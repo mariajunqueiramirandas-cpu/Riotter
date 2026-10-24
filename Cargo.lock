@@ -372,8 +372,6 @@ version = "0.1.0"
 dependencies = [
  "macroquad",
  "rayon",
- "riot_core",
- "riot_data",
  "riot_render",
  "riot_sim",
 ]
@@ -410,7 +408,6 @@ name = "riot_render"
 version = "0.1.0"
 dependencies = [
  "macroquad",
- "riot_core",
  "riot_sim",
 ]
 

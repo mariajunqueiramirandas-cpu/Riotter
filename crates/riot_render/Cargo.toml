@@ -7,7 +7,6 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-riot_core.workspace = true
 riot_sim.workspace = true
 macroquad.workspace = true
 
