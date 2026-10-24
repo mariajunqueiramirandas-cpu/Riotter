@@ -46,7 +46,8 @@ tunables! {
     contact_iters_hot = 4.0, "Contact iterations when the last tick's peak pressure was high.";
     hot_pressure = 0.35, "Peak pressure (0..1) that raises the contact iterations.";
     contact_relax = 0.9, "Jacobi relaxation factor for contact push-out.";
-    pressure_scale = 6.0, "Push-out metres per tick → pressure byte scale (1/m).";
+    pressure_scale = 6.0, "Push-out per contact iteration (m) → pressure (0..1).";
+    pressure_baseline = 0.02, "Push-out per contact iteration (m) that is just walking into people, not pressure.";
     neighbour_skin = 0.15, "Extra reach beyond touching when building neighbour lists (m).";
     sleep_ticks = 40.0, "Ticks of stillness before an agent sleeps.";
     sleep_speed = 0.05, "Speed under which an agent counts as still (m/s).";
@@ -74,7 +75,7 @@ tunables! {
     gas_decay = 0.995, "Per-tick decay of gas.";
     gas_diffuse = 0.18, "Side weight of the 3-tap gas blur.";
     gas_emit = 6.0, "Gas emitted per canister per tick.";
-    gas_fear = 0.06, "Fear per tick per unit of gas.";
+    gas_fear = 0.12, "Fear per tick per unit of gas.";
     gas_damage = 0.004, "Health lost per tick per unit of gas.";
     gas_fatigue = 0.01, "Fatigue per tick per unit of gas.";
     smoke_decay = 0.985, "Per-tick decay of smoke.";
@@ -88,10 +89,10 @@ tunables! {
     rest_recover = 0.0015, "Fatigue recovered per tick while resting.";
     water_recover = 0.25, "Fatigue recovered by drinking.";
     medic_heal = 0.004, "Health restored per tick at a medic post.";
-    crush_pressure = 0.55, "Pressure (0..1) above which bodies are crushed.";
-    crush_damage = 0.02, "Health lost per tick per unit of excess pressure.";
-    crush_fear = 0.05, "Fear per tick per unit of pressure.";
-    fall_pressure = 0.7, "Pressure (0..1) above which people may fall.";
+    crush_pressure = 0.7, "Pressure (0..1) above which bodies are crushed.";
+    crush_damage = 0.004, "Health lost per tick at the most excess pressure (fraction of full health).";
+    crush_fear = 0.01, "Fear per tick at the most excess pressure.";
+    fall_pressure = 0.85, "Pressure (0..1) above which people may fall.";
     fall_chance = 0.01, "Per-tick fall chance at full excess pressure.";
     trip_chance = 0.004, "Per-tick chance of tripping per fallen neighbour when pushed.";
     getup_chance = 0.02, "Per-tick chance a fallen, unpressed person stands up.";

@@ -817,6 +817,12 @@ impl World {
         c.arrived = self.tick;
         c.left = u32::MAX;
         self.outcome.arrived(a);
+        if a == Archetype::Organizer {
+            let list = &mut self.police.organizers;
+            if !list.contains(&stable) && list.len() < list.capacity() {
+                list.push(stable);
+            }
+        }
     }
 
     /// Take someone off the map. They are compacted out at the next reorder.
@@ -865,9 +871,10 @@ impl World {
         let t = self.tun;
         self.fields.activate_for_tick(&self.spatial, &self.map);
         crate::hazards::pin_emitters(self);
-        // Multi-rate layers (DESIGN §8): emotions every 2 ticks, threat every 4.
+        // Multi-rate layers (DESIGN §8): emotions and threat every 4 ticks,
+        // on alternate ticks so their costs do not stack.
         let threat_tick = tick % 4 == 0;
-        let emo_tick = tick % 2 == 0;
+        let emo_tick = tick % 4 == 2;
         self.fields.scatter(
             &self.spatial,
             &self.people,
@@ -879,11 +886,9 @@ impl World {
         if tick % 10 == 0 {
             crate::hazards::stamp_cameras(self);
         }
-        let blur = crate::fields::blur_kernel(t.field_diffuse);
         if emo_tick {
-            self.fields.filter(Layer::Fear, blur, blur, 1.0, false);
-            self.fields.filter(Layer::Anger, blur, blur, 1.0, false);
-            self.fields.filter(Layer::Weight, blur, blur, 1.0, false);
+            self.fields
+                .blur(&[Layer::Fear, Layer::Anger, Layer::Weight], t.field_diffuse);
         }
         if threat_tick {
             let tb = crate::fields::blur_kernel(0.2);

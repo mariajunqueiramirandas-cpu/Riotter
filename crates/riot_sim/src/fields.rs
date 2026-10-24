@@ -61,6 +61,8 @@ pub enum Layer {
 }
 
 pub const LAYERS: usize = 13;
+/// Layers one fused blur pass can carry.
+pub const FUSED: usize = 3;
 
 pub struct Fields {
     pub geom: GridGeom,
@@ -103,7 +105,7 @@ impl Fields {
             slot_chunk: vec![NO_CHUNK; pool],
             free: (0..pool as u16).rev().collect(),
             data: vec![0.0; pool * LAYERS * CL],
-            tmp: vec![0.0; pool * CL],
+            tmp: vec![0.0; pool * FUSED * CL],
             msg: vec![0; pool * CL],
             msg_tmp: vec![0; pool * CL],
             idle: vec![0; pool],
@@ -448,7 +450,8 @@ impl Fields {
             let table = &self.table;
             let slot_chunk = &self.slot_chunk;
             let cdim = self.cdim;
-            self.tmp
+            let pool = self.pool;
+            self.tmp[..pool * CL]
                 .par_chunks_mut(CL)
                 .enumerate()
                 .for_each(|(slot, out)| {
@@ -559,6 +562,101 @@ impl Fields {
                 out.iter().fold(0.0f32, |m, &v| m.max(v.abs()))
             })
             .reduce(|| 0.0f32, f32::max)
+    }
+
+    /// Symmetric 3-tap blur `[a, 1-2a, a]` of up to `FUSED` layers in one
+    /// pair of parallel passes (rows into scratch, then columns back), with a
+    /// 1-cell halo from neighbouring chunks.
+    pub fn blur(&mut self, layers: &[Layer], a: f32) {
+        assert!(layers.len() <= FUSED);
+        let c = 1.0 - 2.0 * a;
+        let pool = self.pool;
+        let cdim = self.cdim;
+        {
+            let (data, table, slot_chunk) = (&self.data, &self.table, &self.slot_chunk);
+            self.tmp[..pool * FUSED * CL]
+                .par_chunks_mut(FUSED * CL)
+                .enumerate()
+                .for_each(|(slot, out)| {
+                    let ch = slot_chunk[slot];
+                    if ch == NO_CHUNK {
+                        return;
+                    }
+                    let (cx, cy) = (ch % cdim, ch / cdim);
+                    let nb = |dx: i32| {
+                        let x = cx as i32 + dx;
+                        if x < 0 || x >= cdim as i32 {
+                            return None;
+                        }
+                        let s = table[(cy * cdim + x as u32) as usize];
+                        (s != NO_SLOT).then_some(s as usize)
+                    };
+                    let (left, right) = (nb(-1), nb(1));
+                    for (j, &l) in layers.iter().enumerate() {
+                        let li = l as usize;
+                        let me = &data[(slot * LAYERS + li) * CL..][..CL];
+                        let o = &mut out[j * CL..(j + 1) * CL];
+                        let mut row = [0.0f32; CC + 2];
+                        for y in 0..CC {
+                            row[1..CC + 1].copy_from_slice(&me[y * CC..(y + 1) * CC]);
+                            row[0] = left
+                                .map_or(0.0, |s| data[(s * LAYERS + li) * CL + y * CC + CC - 1]);
+                            row[CC + 1] =
+                                right.map_or(0.0, |s| data[(s * LAYERS + li) * CL + y * CC]);
+                            let o = &mut o[y * CC..(y + 1) * CC];
+                            for x in 0..CC {
+                                o[x] = a * (row[x] + row[x + 2]) + c * row[x + 1];
+                            }
+                        }
+                    }
+                });
+        }
+        let (tmp, table, slot_chunk) = (&self.tmp, &self.table, &self.slot_chunk);
+        self.data
+            .par_chunks_mut(LAYERS * CL)
+            .enumerate()
+            .for_each(|(slot, d)| {
+                let ch = slot_chunk[slot];
+                if ch == NO_CHUNK {
+                    return;
+                }
+                let (cx, cy) = (ch % cdim, ch / cdim);
+                let nb = |dy: i32| {
+                    let y = cy as i32 + dy;
+                    if y < 0 || y >= cdim as i32 {
+                        return None;
+                    }
+                    let s = table[(y as u32 * cdim + cx) as usize];
+                    (s != NO_SLOT).then_some(s as usize)
+                };
+                let (up, down) = (nb(-1), nb(1));
+                let zero = [0.0f32; CC];
+                for (j, &l) in layers.iter().enumerate() {
+                    let me = &tmp[(slot * FUSED + j) * CL..][..CL];
+                    let above = up.map_or(&zero[..], |s| {
+                        &tmp[(s * FUSED + j) * CL + (CC - 1) * CC..][..CC]
+                    });
+                    let below = down.map_or(&zero[..], |s| &tmp[(s * FUSED + j) * CL..][..CC]);
+                    let out = &mut d[l as usize * CL..(l as usize + 1) * CL];
+                    for y in 0..CC {
+                        let r0 = if y > 0 {
+                            &me[(y - 1) * CC..y * CC]
+                        } else {
+                            above
+                        };
+                        let r1 = &me[y * CC..(y + 1) * CC];
+                        let r2 = if y + 1 < CC {
+                            &me[(y + 1) * CC..(y + 2) * CC]
+                        } else {
+                            below
+                        };
+                        let o = &mut out[y * CC..(y + 1) * CC];
+                        for x in 0..CC {
+                            o[x] = a * (r0[x] + r2[x]) + c * r1[x];
+                        }
+                    }
+                }
+            });
     }
 
     /// Release chunks with no people, no emitters and nothing left; ask for

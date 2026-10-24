@@ -1,7 +1,7 @@
 //! Hazards (DESIGN §2.6): tear gas, fire and smoke, projectiles, cameras,
 //! and the metro (DESIGN §2.8).
 
-use riot_core::math::sweep_circle;
+use riot_core::math::{segment_hit, sweep_circle};
 use riot_core::rng::{Stream, roll_key, unit};
 use riot_core::{StateHasher, Vec2};
 
@@ -12,6 +12,12 @@ use crate::setup::{DT, NotableKind, RiotSetup};
 use crate::spatial::FIELD_CELL;
 use crate::state::{Action, flag, intent, pose, stat};
 use crate::world::{Prop, World, prop_flag};
+
+/// Half the width of a riot shield (m).
+pub const SHIELD_HALF_WIDTH: f32 = 0.36;
+/// Radius of a thrown bottle or stone (m): it cannot thread gaps narrower
+/// than its own width.
+pub const PROJECTILE_RADIUS: f32 = 0.06;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Emitter {
@@ -372,11 +378,12 @@ pub fn projectiles(w: &mut World) {
             p1 = p0 + (p1 - p0) * (t * 0.98);
             landed = true;
         }
-        // Bodies: the earliest one the segment touches.
-        let mut hit: Option<(f32, usize)> = None;
+        // Bodies and shields: the earliest one the segment touches. A shield
+        // is an oriented segment in front of its officer (DESIGN §14).
+        let mut hit: Option<(f32, usize, bool)> = None;
         if pr.kind != ProjectileKind::Canister {
             let mid = (p0 + p1) * 0.5;
-            let reach = (p1 - p0).len() * 0.5 + 0.5;
+            let reach = (p1 - p0).len() * 0.5 + 1.0;
             let px = riot_core::lanes::flat(&w.people.pos_x);
             let py = riot_core::lanes::flat(&w.people.pos_y);
             let owner = pr.owner;
@@ -386,21 +393,27 @@ pub fn projectiles(w: &mut World) {
                 if people.stable_id[j] == owner || people.stat[j][stat::FLAGS] & flag::DEAD != 0 {
                     return;
                 }
-                if let Some(t) =
-                    sweep_circle(p0, p1, Vec2::new(px[j], py[j]), sp.radius[j].max(0.2))
+                let c = Vec2::new(px[j], py[j]);
+                if people.stat[j][stat::FLAGS] & flag::SHIELD != 0 {
+                    let f = Vec2::from_heading(people.pose[j][pose::HEADING]);
+                    let centre = c + f * (sp.radius[j] + 0.1);
+                    let half = f.perp() * (SHIELD_HALF_WIDTH + PROJECTILE_RADIUS);
+                    if let Some(t) = segment_hit(p0, p1, centre - half, centre + half)
+                        && hit.is_none_or(|h| t < h.0)
+                    {
+                        hit = Some((t, j, true));
+                    }
+                }
+                if let Some(t) = sweep_circle(p0, p1, c, sp.radius[j].max(0.2) + PROJECTILE_RADIUS)
                     && hit.is_none_or(|h| t < h.0)
                 {
-                    hit = Some((t, j));
+                    hit = Some((t, j, false));
                 }
             });
         }
-        if let Some((t, j)) = hit {
+        if let Some((t, j, shield)) = hit {
             let at = p0 + (p1 - p0) * t;
-            let dir = pr.vel.normalize_or_zero();
-            let facing = Vec2::from_heading(w.people.pose[j][pose::HEADING]);
-            let shielded =
-                w.people.stat[j][stat::FLAGS] & flag::SHIELD != 0 && facing.dot(-dir) > 0.3;
-            if shielded {
+            if shield {
                 w.hazards.blocked += 1;
             } else {
                 w.hazards.hits += 1;

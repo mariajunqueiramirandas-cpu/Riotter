@@ -265,10 +265,15 @@ pub fn spread(w: &mut World) {
             .notable(tick, NotableKind::InternetShutdown, Vec2::ZERO, u32::MAX);
     }
     let mode = w.setup.comms.mode;
-    let dilate_every: u32 = match mode {
+    // Word of mouth moves one cell every M ticks, set by comms quality; the
+    // whole pass runs on those ticks only, with chances scaled by M.
+    let every: u32 = match mode {
         CommsMode::Phones => 2,
         CommsMode::Degraded | CommsMode::Shutdown => 3,
     };
+    if tick % every != 0 {
+        return;
+    }
     let hop = w.tun.hop_loss.clamp(0.0, 255.0) as u16;
 
     // 1. Carriers scatter (fidelity - hop loss, id): a segmented max.
@@ -286,9 +291,7 @@ pub fn spread(w: &mut World) {
         stamp_max(&mut w.fields, w.people.pos(i), voice, v);
     }
     // 3. Word of mouth: dilate by one cell.
-    if tick % dilate_every == 0 {
-        dilate(&mut w.fields, hop);
-    }
+    dilate(&mut w.fields, hop);
     // 4 + 5. Adoption and phones.
     let phone_rate = if !w.internet || mode == CommsMode::Shutdown {
         0.0
@@ -312,8 +315,8 @@ pub fn spread(w: &mut World) {
         objectives: &w.objectives,
         seed: w.seed,
         tick,
-        hear_rate: w.tun.hear_rate,
-        phone_rate,
+        hear_rate: w.tun.hear_rate * every as f32,
+        phone_rate: phone_rate * every as f32,
         phone_fid,
     };
     adopt(&mut w.people, &ctx);
@@ -493,7 +496,7 @@ fn adopt(p: &mut People, cx: &AdoptCtx) {
                     continue;
                 }
                 let a = Archetype::from_u8(st[stat::ARCH]);
-                if a.is_officer() || a == Archetype::Organizer && belief::id(bs[k]) != 0 {
+                if a.is_officer() {
                     continue;
                 }
                 let own = bs[k];
@@ -511,10 +514,10 @@ fn adopt(p: &mut People, cx: &AdoptCtx) {
                 };
                 let mut take: Option<u16> = None;
                 if belief::id(heard) != 0 && belief::id(heard) != belief::id(own) {
+                    // A newer plan replaces an older one; an older plan never
+                    // replaces a newer one, however clearly it is heard.
                     let newer = is_newer(cx.msgs, belief::id(heard), belief::id(own));
-                    let clearer =
-                        belief::fidelity(heard) > belief::fidelity(own).saturating_add(24);
-                    if belief::id(own) == 0 || newer || clearer {
+                    if belief::id(own) == 0 || newer {
                         let trust = cx.arch[a as usize].trust;
                         if unit(r()) < cx.hear_rate * (0.25 + trust) {
                             take = Some(heard);

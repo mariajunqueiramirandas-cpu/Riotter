@@ -220,6 +220,17 @@ fn print_status(w: &mut World, ms: f64) {
         }
     }
     println!(
+        "  hazards: emitters {} gas {} smoke {} fire {} fires {} projectiles {} blocked {} hits {}",
+        w.hazards.emitters.len(),
+        w.hazards.gas_live,
+        w.hazards.smoke_live,
+        w.hazards.fire_live,
+        w.outcome.fires,
+        w.hazards.projectiles.len(),
+        w.hazards.blocked,
+        w.hazards.hits
+    );
+    println!(
         "  police: clusters {:?} violence {:.1} squads {:?}; radical anger {:.2}",
         w.police
             .clusters

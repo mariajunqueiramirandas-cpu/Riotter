@@ -468,10 +468,19 @@ fn apply(w: &mut World, e: Event) {
                 return;
             }
             let i = who as usize;
-            let dmg = narrow_u8(w.tun.crush_damage * widen_u8(amount));
-            damage(w, i, dmg.max(1), u32::MAX);
+            // Health points per tick, rounded stochastically so slight excess
+            // pressure hurts slowly rather than not at all or at once.
+            let stable = w.people.stable_id[i];
+            let r = unit(roll_key(w.seed, tick, stable, 2, Stream::Body));
+            let hp = w.tun.crush_damage * widen_u8(amount) * 255.0;
+            let dmg = (hp + r).floor().clamp(0.0, 255.0) as u8;
+            if dmg > 0 {
+                damage(w, i, dmg, u32::MAX);
+            }
+            let fear = w.tun.crush_fear * widen_u8(amount) * 255.0;
+            let df = (fear + r).floor().clamp(0.0, 255.0) as u8;
             let f = &mut w.people.emo[i][emo::FEAR];
-            *f = f.saturating_add(narrow_u8(w.tun.crush_fear * widen_u8(amount)).max(1));
+            *f = f.saturating_add(df);
             if !w.outcome.crush_noted && amount > 128 {
                 w.outcome.crush_noted = true;
                 let p = w.people.pos(i);

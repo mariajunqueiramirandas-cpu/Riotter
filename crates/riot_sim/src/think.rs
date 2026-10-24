@@ -517,6 +517,10 @@ fn think_chunk(
         }
     }
 
+    let mut noise = [0u64; CHUNK_AGENTS];
+    for b in 0..n {
+        noise[b] = roll(cx.seed, cx.tick, ids[batch[b] as usize], Stream::Think);
+    }
     // Score, one action at a time across the batch.
     let mut best = [0u8; CHUNK_AGENTS];
     let mut best_s = [f32::NEG_INFINITY; CHUNK_AGENTS];
@@ -539,8 +543,9 @@ fn think_chunk(
         for b in 0..n {
             let k = batch[b] as usize;
             let cur = ss[k][stat::ACTION] as usize;
-            let r = roll(cx.seed, cx.tick, ids[k] ^ (act as u32) << 24, Stream::Think);
-            let mut sc = score[b] * (0.85 + 0.3 * unit(r));
+            // Five bits of one roll per action: deterministic noise.
+            let bits = (noise[b] >> (act * 5)) & 31;
+            let mut sc = score[b] * (0.85 + 0.3 * (bits as f32 * (1.0 / 31.0)));
             if cur == act {
                 sc *= 1.25;
             }

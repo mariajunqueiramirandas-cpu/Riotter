@@ -177,9 +177,18 @@ pub fn steer(
                         let away = -(cx.fields.gradient(Layer::Threat, pos) * 2.0
                             + cx.fields.gradient(Layer::Gas, pos) * 4.0
                             + cx.fields.gradient(Layer::Fire, pos) * 4.0);
+                        let away = away.normalize_or_zero();
                         let exit = route(GOAL_EXITS, rec, pos + away).unwrap_or(Vec2::ZERO);
-                        desired =
-                            (away.normalize_or_zero() * 0.7 + exit).normalize_or_zero() * speed;
+                        // Get away from the danger first; take the way out
+                        // only when it does not lead back into it.
+                        let dir = if away == Vec2::ZERO {
+                            exit
+                        } else if exit.dot(away) < 0.0 {
+                            away
+                        } else {
+                            away * 0.7 + exit
+                        };
+                        desired = dir.normalize_or_zero() * speed;
                     }
                     Action::GoHome => {
                         if let Some(d) = route(GOAL_EXITS, rec, pos) {
@@ -306,9 +315,13 @@ pub fn steer(
                     desired = desired.clamp_len(a.run);
                 }
 
-                // Anticipatory avoidance over the neighbour list (time to collision).
+                // Anticipatory avoidance over the neighbour list (time to
+                // collision). The response grows as the collision nears but
+                // stays bounded, and fades in a packed crowd, where people
+                // stop anticipating and simply push.
                 let mut avoid = Vec2::ZERO;
                 let ri = a.radius;
+                let mut touching = 0u32;
                 for &j in cx.sp.neighbours(i) {
                     let j = j as usize;
                     let q = Vec2::new(px[j], py[j]);
@@ -316,14 +329,29 @@ pub fn steer(
                     let d = q - pos;
                     let rv = desired - w;
                     let rr = ri + cx.sp.radius[j];
+                    if d.len2() < (rr + 0.05) * (rr + 0.05) {
+                        touching += 1;
+                    }
                     let ttc = time_to_collision(d, rv, rr);
                     if ttc > 0.0 && ttc < tun.avoid_horizon {
-                        // Push sideways from where the collision would happen.
+                        // Sideways from where the collision would happen.
                         let at = d - rv * ttc;
-                        let k = tun.avoid_strength * (tun.avoid_horizon - ttc)
-                            / (tun.avoid_horizon * ttc.max(0.15));
-                        avoid -= at.normalize_or_zero() * k;
+                        let x = 1.0 - ttc / tun.avoid_horizon;
+                        avoid -= at.normalize_or_zero() * (tun.avoid_strength * x * x);
                     }
+                }
+                avoid = avoid.clamp_len(1.0) * (1.0 / (1.0 + touching as f32));
+                // In a packed crowd people stop shoving toward a spot they
+                // cannot reach; marchers keep pushing a little, the panicked
+                // push hard. That is how crushes start.
+                if touching >= 3 {
+                    let patience = match act {
+                        Action::Flee => 1.0,
+                        Action::March | Action::GoHome | Action::SeekSupply | Action::Help => 0.6,
+                        _ if arch.is_officer() => 0.8,
+                        _ => 0.2,
+                    };
+                    desired = desired * patience;
                 }
                 // Walls ahead.
                 let ahead = pos + desired * 0.4;

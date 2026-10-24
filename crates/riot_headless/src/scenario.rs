@@ -18,6 +18,14 @@ pub fn load(args: &Args) -> Result<Scenario, String> {
             "loading `{path}` needs riot_data, which is not wired up yet"
         ));
     }
+    if let Some(n) = args.u32("crush") {
+        let (map, setup) = testkit::crush(n, args.u64("seed").unwrap_or(1));
+        return Ok(Scenario {
+            setup,
+            map,
+            tunables: Tunables::default(),
+        });
+    }
     let size = args.f32("size").unwrap_or(1024.0);
     let people = args.u32("people").unwrap_or(2000);
     let squads = args.u32("squads").unwrap_or(8);

@@ -316,6 +316,10 @@ pub fn move_bodies(p: &mut People, s: &mut PhysScratch, events: &mut [Vec<Event>
     let (x0, y0) = (&s.x0[..span], &s.y0[..span]);
     let press = &s.press[..span];
     let pscale = tun.pressure_scale;
+    let inv_iters = 1.0 / iters as f32;
+    // Walking into a standing crowd overlaps by about one step a tick: that
+    // is pushing, not pressure. Only compression beyond it counts.
+    let baseline = tun.pressure_baseline;
     let (sleep_speed, sleep_ticks) = (tun.sleep_speed, tun.sleep_ticks.clamp(1.0, 255.0) as u8);
     s.partial_peak.clear();
     px.par_chunks_mut(CHUNK_AGENTS)
@@ -395,7 +399,7 @@ pub fn move_bodies(p: &mut People, s: &mut PhysScratch, events: &mut [Vec<Event>
                 let v = v.clamp_len(10.0);
                 vx[k] = v.x;
                 vy[k] = v.y;
-                let pr = (press[i] + wall_push) * pscale;
+                let pr = ((press[i] * inv_iters - baseline).max(0.0) + wall_push) * pscale;
                 peak = peak.max(pr.min(1.0));
                 pose[k][pose::PRESSURE] = narrow_u8(pr);
 
@@ -423,8 +427,9 @@ pub fn move_bodies(p: &mut People, s: &mut PhysScratch, events: &mut [Vec<Event>
                     pose[k][pose::STRIDE].wrapping_add((speed * DT * (256.0 / 1.4)) as u8);
 
                 // Stillness counter and falling asleep (DESIGN §7.6).
+                // Only sleep untouched: two overlapping sleepers would never separate.
                 let calm = widen_u8(emo[i][emo::FEAR]) < 0.45
-                    && pose[k][pose::PRESSURE] < 40
+                    && press[i] * inv_iters < 0.004
                     && fl & flag::URGENT == 0;
                 let restful = matches!(
                     act,

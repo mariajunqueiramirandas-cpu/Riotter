@@ -276,3 +276,22 @@ pub fn central(map: &MapDef, people: u32, seed: u64) -> RiotSetup {
     });
     s
 }
+
+/// `people` standing at about 5/m² on an open map, all pushing toward a
+/// small objective in the middle: a crowd under pressure.
+pub fn crush(people: u32, seed: u64) -> (MapDef, RiotSetup) {
+    let r = (people as f32 / (5.0 * core::f32::consts::PI)).sqrt();
+    let (mut map, mut setup) = packed(256.0, people, seed);
+    map.entries[0].radius = r;
+    setup.objectives.push(ObjectiveDef {
+        name: "centre".into(),
+        kind: ObjectiveKind::MarchTo,
+        area: None,
+        pos: [0.0, 0.0],
+        radius: 3.0,
+        weight: 1.0,
+        announced: true,
+        stance: Stance::Peaceful,
+    });
+    (map, setup)
+}

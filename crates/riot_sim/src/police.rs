@@ -37,6 +37,8 @@ use crate::world::{NO_SLOT, SetupError, World, appearance_for};
 pub const MAX_SQUAD: usize = 16;
 pub const NO_SQUAD: u16 = u16::MAX;
 const MAX_CLUSTERS: usize = 32;
+/// Most squads committed to one cluster.
+const MAX_PICK: usize = 8;
 const PATH: usize = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
@@ -226,7 +228,8 @@ impl Police {
                 deployed: false,
                 anchor: home,
                 facing: Vec2::new(1.0, 0.0),
-                width: n as f32 * 1.1,
+                // Riot squads close up into a shield wall.
+                width: n as f32 * if d.kind == SquadKind::Riot { 0.62 } else { 1.1 },
                 radius: 0.0,
                 cluster: u16::MAX,
                 target_person: u32::MAX,
@@ -745,9 +748,16 @@ fn assign(w: &mut World) {
     for ci in 0..nclusters {
         let c = w.police.clusters[ci];
         let violent = c.threat > 6.0 || w.police.violence > 4.0;
-        let want = ((c.count / 350.0).ceil() as usize).clamp(1, 6);
+        // Enough squads for the crowd, and to ring it if it may be kettled:
+        // officers at most 1.4 m apart around its packed radius.
+        let mut want = (c.count / 350.0).ceil() as usize;
+        if rung >= Escalation::LinesAndKettles && violent && c.count < 1500.0 {
+            let packed_r = (c.count / (2.5 * core::f32::consts::PI)).sqrt().max(4.0);
+            want = want.max((2.0 * core::f32::consts::PI * packed_r / 1.4 / 10.0).ceil() as usize);
+        }
+        let want = want.clamp(1, MAX_PICK);
         // Nearest free squads, preferring the right kinds.
-        let mut picked = [usize::MAX; 6];
+        let mut picked = [usize::MAX; MAX_PICK];
         let mut np = 0;
         for _ in 0..want {
             let mut best: Option<(f32, usize)> = None;
@@ -1043,7 +1053,7 @@ fn update_squads(w: &mut World) {
                 if let Some(c) = w.police.clusters.get(squad.cluster as usize) {
                     let min_r = (c.count / (2.5 * core::f32::consts::PI)).sqrt().max(4.0);
                     if (squad.pos - squad.anchor).len() < squad.radius + 6.0 {
-                        squad.radius = (squad.radius * (1.0 - shrink * 0.05)).max(min_r);
+                        squad.radius = (squad.radius * (1.0 - shrink)).max(min_r);
                     }
                 }
             }
@@ -1123,6 +1133,13 @@ fn update_squads(w: &mut World) {
                     NO_GOAL
                 };
                 let _ = target;
+            }
+            // A new order wakes a sleeping officer (DESIGN §7.6).
+            if (t.pos - me).len2() > 2.25 {
+                let st = &mut w.people.stat[i][stat::FLAGS];
+                if *st & flag::ASLEEP != 0 {
+                    *st = (*st & !flag::ASLEEP) | flag::URGENT;
+                }
             }
             w.officer_targets[o as usize] = t;
         }
