@@ -26,7 +26,7 @@ use riot_core::Vec2;
 use riot_core::math::HEADING_DIRS;
 
 use crate::fields::{Fields, Layer};
-use crate::map::{BLOCKED, Map, OPEN, REGION, TILE, TILE_M};
+use crate::map::{BLOCKED, Map, REGION, TILE, TILE_M};
 use crate::tunables::Tunables;
 
 pub const MAX_GOALS: usize = 32;
@@ -47,9 +47,12 @@ const PAGE_COST: usize = (REGION * REGION) as usize * 4;
 const PAGE_TILES: usize = (REGION * REGION) as usize;
 /// Cost of crossing one open tile (8 m at 20 units per metre).
 const TILE_STEP: u32 = 160;
-const HEAP_CAP: usize = 1 << 20;
+/// Buckets in Dial's queue: more than the largest tile step cost.
+const DIAL_BUCKETS: usize = 1024;
+/// Largest tile step cost (`TILE_STEP` plus the largest penalty).
+const MAX_STEP: u32 = TILE_STEP * 4;
 /// Most flow tiles built per tick; further requests wait a tick.
-const MAX_JOBS_PER_TICK: usize = 256;
+const MAX_JOBS_PER_TICK: usize = 96;
 /// Most corridor recomputes per tick.
 const MAX_RECOMPUTES_PER_TICK: usize = 2;
 
@@ -60,8 +63,10 @@ pub struct Goal {
     pub radius: f32,
     /// Target generation: flow tiles from another generation are useless.
     pub generation: u32,
-    /// Cost version: flow tiles from an older version are stale but usable.
+    /// Recompute epoch; tiles record the epoch their costs last changed.
     pub version: u32,
+    /// Last tick anyone asked for or used this goal's flow.
+    pub last_used: u32,
     pub rcost: Vec<u32>,
     pub rnext: Vec<u32>,
     pub region_ready: bool,
@@ -113,6 +118,16 @@ pub fn record(goal: u8, tile: u32, request: bool) -> u64 {
 pub struct FlowSystem {
     pub goals: Vec<Goal>,
     pub page_cost: Vec<u32>,
+    /// Costs before the latest recompute, to detect what changed.
+    page_prev: Vec<u32>,
+    /// Cost of entering each tile, refreshed with the costs.
+    page_step: Vec<u32>,
+    /// Epoch at which each tile's costs (or a neighbour's) last changed
+    /// noticeably: its flow tile is stale if built before that.
+    pub page_epoch: Vec<u32>,
+    page_region: Vec<u32>,
+    /// Dial's bucket queue (DESIGN §9).
+    dial: Vec<Vec<u32>>,
     pub page_flow: Vec<u32>,
     pub page_free: Vec<u32>,
     pub meta: Vec<FlowMeta>,
@@ -121,7 +136,7 @@ pub struct FlowSystem {
     clock: usize,
     jobs: Vec<Job>,
     new_jobs: Vec<Job>,
-    job_dirs: Vec<[u8; 256]>,
+    job_bufs: Vec<JobBuf>,
     heap: BinaryHeap<Reverse<(u32, u32)>>,
     merged: Vec<u64>,
     /// Requests and usage from steering, one buffer per agent chunk.
@@ -149,6 +164,7 @@ impl FlowSystem {
             radius: 4.0,
             generation: 0,
             version: 0,
+            last_used: 0,
             rcost: vec![INF; rn],
             rnext: vec![NONE; rn],
             region_ready: false,
@@ -173,6 +189,11 @@ impl FlowSystem {
             // One at a time: cloning a Vec does not keep its capacity.
             goals: (0..MAX_GOALS).map(|_| make_goal()).collect(),
             page_cost: vec![INF; pages * PAGE_COST],
+            page_prev: vec![INF; pages * PAGE_COST],
+            page_step: vec![TILE_STEP; pages * PAGE_TILES],
+            page_epoch: vec![0; pages * PAGE_TILES],
+            page_region: vec![NONE; pages],
+            dial: (0..DIAL_BUCKETS).map(|_| Vec::with_capacity(256)).collect(),
             page_flow: vec![NONE; pages * PAGE_TILES],
             page_free: (0..pages as u32).rev().collect(),
             meta: vec![meta; flow_tiles],
@@ -181,8 +202,13 @@ impl FlowSystem {
             clock: 0,
             jobs: Vec::with_capacity(MAX_JOBS_PER_TICK * 64),
             new_jobs: Vec::with_capacity(MAX_JOBS_PER_TICK),
-            job_dirs: vec![[0; 256]; MAX_JOBS_PER_TICK],
-            heap: BinaryHeap::with_capacity(HEAP_CAP),
+            job_bufs: (0..MAX_JOBS_PER_TICK)
+                .map(|_| JobBuf {
+                    dirs: [0; 256],
+                    heap: SmallHeap::new(),
+                })
+                .collect(),
+            heap: BinaryHeap::with_capacity(map.rnodes.len() * 8 + 64),
             merged: Vec::with_capacity(agent_chunks * 512),
             records: (0..agent_chunks).map(|_| Vec::with_capacity(512)).collect(),
             stats: FlowStats::default(),
@@ -239,12 +265,12 @@ impl FlowSystem {
         }
         let (tx, ty) = (t & (map.tdim - 1), t >> map.tshift);
         let local = ((ty % REGION) * REGION + tx % REGION) as usize;
-        let s = self.page_flow[page as usize * PAGE_TILES + local];
+        let at = page as usize * PAGE_TILES + local;
+        let s = self.page_flow[at];
         if s == NONE || s == PENDING {
             return Lookup::Missing;
         }
-        let m = &self.meta[s as usize];
-        if m.version == goal.version {
+        if self.meta[s as usize].version >= self.page_epoch[at] {
             Lookup::Ready(s)
         } else {
             Lookup::Stale(s)
@@ -308,6 +334,7 @@ impl FlowSystem {
             if !self.goals[g as usize].active {
                 continue;
             }
+            self.goals[g as usize].last_used = tick;
             let r = map.region_of_tile(t);
             let page = self.goals[g as usize].pages[r as usize];
             if page == NONE {
@@ -335,7 +362,7 @@ impl FlowSystem {
             }
             if s != NONE {
                 let m = self.meta[s as usize];
-                if m.rebuild_queued || m.version == self.goals[g as usize].version {
+                if m.rebuild_queued || m.version >= self.page_epoch[local] {
                     continue;
                 }
             }
@@ -375,33 +402,45 @@ impl FlowSystem {
             if !goal.active {
                 continue;
             }
-            let due = !goal.page_list.is_empty() && tick.wrapping_sub(goal.last_refresh) >= refresh;
+            // Refresh dynamic costs about once a second, while anyone uses it.
+            let used = tick.wrapping_sub(goal.last_used) < refresh * 4;
+            let due = used
+                && !goal.page_list.is_empty()
+                && tick.wrapping_sub(goal.last_refresh) >= refresh;
             if (goal.dirty || !goal.want_regions.is_empty() || due)
                 && recomputes < MAX_RECOMPUTES_PER_TICK
             {
-                let bump = due || goal.dirty;
-                self.recompute(map, fields, tun, g as u8, tick, bump);
+                self.recompute(map, fields, tun, g as u8, tick);
                 recomputes += 1;
             }
         }
 
         // 4. Build the new jobs in parallel, then copy them into their slots.
         let n = self.new_jobs.len();
-        let mut out = std::mem::take(&mut self.job_dirs);
+        let mut out = std::mem::take(&mut self.job_bufs);
         {
             let this = &*self;
             out[..n]
                 .par_iter_mut()
                 .zip(this.new_jobs.par_iter())
                 .for_each(|(dst, j)| {
-                    build_tile(this, map, fields, tun, j.goal, j.tile, dst);
+                    build_tile(
+                        this,
+                        map,
+                        fields,
+                        tun,
+                        j.goal,
+                        j.tile,
+                        &mut dst.dirs,
+                        &mut dst.heap,
+                    );
                 });
         }
-        self.job_dirs = out;
+        self.job_bufs = out;
         for k in 0..n {
             let j = self.new_jobs[k];
             let s = j.slot as usize;
-            self.dirs[s * 256..(s + 1) * 256].copy_from_slice(&self.job_dirs[k]);
+            self.dirs[s * 256..(s + 1) * 256].copy_from_slice(&self.job_bufs[k].dirs);
             self.stats.built += 1;
             if latency == 0 {
                 self.finish_job(map, j);
@@ -474,15 +513,7 @@ impl FlowSystem {
     }
 
     /// Region Dijkstra (if needed), corridor growth and the tile Dijkstra.
-    fn recompute(
-        &mut self,
-        map: &Map,
-        fields: &Fields,
-        tun: &Tunables,
-        g: u8,
-        tick: u32,
-        bump: bool,
-    ) {
+    fn recompute(&mut self, map: &Map, fields: &Fields, tun: &Tunables, g: u8, tick: u32) {
         self.stats.recomputes += 1;
         let gi = g as usize;
         if !self.goals[gi].region_ready {
@@ -513,13 +544,11 @@ impl FlowSystem {
         let mut wants = wants;
         wants.clear();
         self.goals[gi].want_regions = wants;
-        self.tile_dijkstra(map, fields, tun, g);
         let goal = &mut self.goals[gi];
+        goal.version += 1;
         goal.dirty = false;
-        if bump {
-            goal.version = goal.version.wrapping_add(1);
-            goal.last_refresh = tick;
-        }
+        goal.last_refresh = tick;
+        self.tile_dijkstra(map, fields, tun, g);
     }
 
     fn add_corridor_region(&mut self, map: &Map, g: u8, reg: u32) {
@@ -542,6 +571,9 @@ impl FlowSystem {
             goal.corridor[r] = true;
             goal.pages[r] = p;
             goal.page_list.push(p);
+            self.page_region[p as usize] = r as u32;
+            self.page_prev[p as usize * PAGE_COST..(p as usize + 1) * PAGE_COST].fill(INF);
+            self.page_epoch[p as usize * PAGE_TILES..(p as usize + 1) * PAGE_TILES].fill(0);
             self.page_cost[p as usize * PAGE_COST..(p as usize + 1) * PAGE_COST].fill(INF);
             self.page_flow[p as usize * PAGE_TILES..(p as usize + 1) * PAGE_TILES].fill(NONE);
         }
@@ -594,14 +626,19 @@ impl FlowSystem {
         heap.clear();
         {
             let goal = &self.goals[gi];
-            let mut sources: Vec<u32> = Vec::new();
+            let mut sources = [0u32; 256];
+            let mut ns = 0;
             Self::for_each_source(map, goal, |t, c| {
-                if let Some(n) = map.rnode_of(t, c) {
-                    sources.push(n);
+                if let Some(n) = map.rnode_of(t, c)
+                    && ns < sources.len()
+                    && !sources[..ns].contains(&n)
+                {
+                    sources[ns] = n;
+                    ns += 1;
                 }
             });
             let goal = &mut self.goals[gi];
-            for n in sources {
+            for &n in &sources[..ns] {
                 if goal.rcost[n as usize] != 0 {
                     goal.rcost[n as usize] = 0;
                     goal.rnext[n as usize] = n;
@@ -619,7 +656,7 @@ impl FlowSystem {
                 if nc < goal.rcost[m as usize] {
                     goal.rcost[m as usize] = nc;
                     goal.rnext[m as usize] = n;
-                    if heap.len() < HEAP_CAP {
+                    if heap.len() < heap.capacity() {
                         heap.push(Reverse((nc, m)));
                     } else {
                         self.stats.heap_overflow += 1;
@@ -630,69 +667,128 @@ impl FlowSystem {
         goal.region_ready = true;
     }
 
-    /// Dijkstra over tile components restricted to the corridor.
+    /// Dijkstra over tile components restricted to the corridor, with
+    /// Dial's bucket queue over integer costs (DESIGN §9). Tiles whose costs
+    /// changed noticeably, and their neighbours, get the new epoch so their
+    /// flow tiles are rebuilt; everything else keeps its flow.
     fn tile_dijkstra(&mut self, map: &Map, fields: &Fields, tun: &Tunables, g: u8) {
         let gi = g as usize;
+        let epoch = self.goals[gi].version;
         for &p in &self.goals[gi].page_list {
-            self.page_cost[p as usize * PAGE_COST..(p as usize + 1) * PAGE_COST].fill(INF);
+            let (a, b) = (p as usize * PAGE_COST, (p as usize + 1) * PAGE_COST);
+            self.page_prev[a..b].copy_from_slice(&self.page_cost[a..b]);
+            self.page_cost[a..b].fill(INF);
+            let r = self.page_region[p as usize];
+            let (rx, ry) = (r % map.rdim, r / map.rdim);
+            for local in 0..PAGE_TILES as u32 {
+                let t = map.tile_index(rx * REGION + local % REGION, ry * REGION + local / REGION);
+                self.page_step[p as usize * PAGE_TILES + local as usize] =
+                    tile_step_cost(map, fields, tun, t);
+            }
         }
-        let heap = &mut self.heap;
-        heap.clear();
         let goal = &self.goals[gi];
         let page_cost = &mut self.page_cost;
-        let idx = |t: u32, c: u8| -> Option<usize> {
+        let page_step = &self.page_step;
+        let dial = &mut self.dial;
+        for b in dial.iter_mut() {
+            b.clear();
+        }
+        let page_of = |t: u32| -> Option<(usize, usize)> {
             let page = goal.pages[map.region_of_tile(t) as usize];
             if page == NONE {
                 return None;
             }
             let (tx, ty) = (t & (map.tdim - 1), t >> map.tshift);
-            Some(
-                page as usize * PAGE_COST
-                    + ((ty % REGION) * REGION + tx % REGION) as usize * 4
-                    + c as usize,
-            )
+            Some((
+                page as usize,
+                ((ty % REGION) * REGION + tx % REGION) as usize,
+            ))
         };
+        let idx = |t: u32, c: u8| page_of(t).map(|(p, l)| p * PAGE_COST + l * 4 + c as usize);
+        let mut pending = 0usize;
         Self::for_each_source(map, goal, |t, c| {
             if let Some(i) = idx(t, c)
                 && page_cost[i] != 0
             {
                 page_cost[i] = 0;
-                heap.push(Reverse((0, (t << 2) | c as u32)));
+                dial[0].push((t << 2) | c as u32);
+                pending += 1;
             }
         });
         let tdim = map.tdim;
-        while let Some(Reverse((cost, key))) = heap.pop() {
-            let (t, c) = (key >> 2, (key & 3) as u8);
-            let Some(i) = idx(t, c) else { continue };
-            if cost > page_cost[i] {
-                continue;
-            }
-            let (tx, ty) = (t & (tdim - 1), t >> map.tshift);
-            for (dx, dy) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
-                let (nx, ny) = (tx as i32 + dx, ty as i32 + dy);
-                if nx < 0 || ny < 0 || nx >= tdim as i32 || ny >= tdim as i32 {
+        let nb = dial.len();
+        let mut cur = 0u32;
+        while pending > 0 {
+            let b = cur as usize % nb;
+            let items = std::mem::take(&mut dial[b]);
+            for &key in &items {
+                pending -= 1;
+                let (t, c) = (key >> 2, (key & 3) as u8);
+                let Some(i) = idx(t, c) else { continue };
+                if page_cost[i] != cur {
                     continue;
                 }
-                let nt = map.tile_index(nx as u32, ny as u32);
-                if idx(nt, 0).is_none() {
-                    continue;
-                }
-                let step = tile_step_cost(map, fields, tun, nt);
-                let mut done = [false; 4];
-                for_each_link(map, t, c, nt, dx, dy, |nc| {
-                    if done[nc as usize] {
-                        return;
+                let (tx, ty) = (t & (tdim - 1), t >> map.tshift);
+                for (dx, dy) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+                    let (nx, ny) = (tx as i32 + dx, ty as i32 + dy);
+                    if nx < 0 || ny < 0 || nx >= tdim as i32 || ny >= tdim as i32 {
+                        continue;
                     }
-                    done[nc as usize] = true;
-                    let Some(j) = idx(nt, nc) else { return };
-                    let new = cost.saturating_add(step);
-                    if new < page_cost[j] {
-                        page_cost[j] = new;
-                        if heap.len() < HEAP_CAP {
-                            heap.push(Reverse((new, (nt << 2) | nc as u32)));
+                    let nt = map.tile_index(nx as u32, ny as u32);
+                    let Some((np, nl)) = page_of(nt) else {
+                        continue;
+                    };
+                    let step = page_step[np * PAGE_TILES + nl].min(MAX_STEP);
+                    let mut done = [false; 4];
+                    for_each_link(map, t, c, nt, dx, dy, |nc| {
+                        if std::mem::replace(&mut done[nc as usize], true) {
+                            return;
                         }
+                        let j = np * PAGE_COST + nl * 4 + nc as usize;
+                        let new = cur + step;
+                        if new < page_cost[j] {
+                            page_cost[j] = new;
+                            dial[new as usize % nb].push((nt << 2) | nc as u32);
+                            pending += 1;
+                        }
+                    });
+                }
+            }
+            let mut items = items;
+            items.clear();
+            dial[b] = items;
+            cur += 1;
+        }
+        // Mark tiles whose costs changed noticeably, and their neighbours.
+        for k in 0..goal.page_list.len() {
+            let p = goal.page_list[k] as usize;
+            let r = self.page_region[p];
+            let (rx, ry) = (r % map.rdim, r / map.rdim);
+            for local in 0..PAGE_TILES {
+                let base = p * PAGE_COST + local * 4;
+                let changed = (0..4).any(|c| {
+                    let (old, new) = (self.page_prev[base + c], self.page_cost[base + c]);
+                    if old == INF || new == INF {
+                        return old != new;
                     }
+                    old.abs_diff(new) > old.max(new) / 25 + 40
                 });
+                if !changed {
+                    continue;
+                }
+                let (tx, ty) = (
+                    rx * REGION + local as u32 % REGION,
+                    ry * REGION + local as u32 / REGION,
+                );
+                for (dx, dy) in [(0i32, 0i32), (1, 0), (-1, 0), (0, 1), (0, -1)] {
+                    let (nx, ny) = (tx as i32 + dx, ty as i32 + dy);
+                    if nx < 0 || ny < 0 || nx >= tdim as i32 || ny >= tdim as i32 {
+                        continue;
+                    }
+                    if let Some((np, nl)) = page_of(map.tile_index(nx as u32, ny as u32)) {
+                        self.page_epoch[np * PAGE_TILES + nl] = epoch;
+                    }
+                }
             }
         }
     }
@@ -712,35 +808,25 @@ fn tile_step_cost(map: &Map, fields: &Fields, tun: &Tunables, t: u32) -> u32 {
 /// Call `f(neighbour_comp)` for every component of tile `nt` (offset
 /// `dx, dy` from `t`) that component `c` of `t` connects to.
 #[inline]
-fn for_each_link(map: &Map, t: u32, c: u8, nt: u32, dx: i32, dy: i32, mut f: impl FnMut(u8)) {
-    let (ka, kb) = (map.tiles[t as usize], map.tiles[nt as usize]);
-    if ka == BLOCKED || kb == BLOCKED {
-        return;
-    }
-    if ka == OPEN && kb == OPEN {
-        f(0);
-        return;
-    }
-    let (tx, ty) = (t & (map.tdim - 1), t >> map.tshift);
-    for k in 0..TILE {
-        let (a, b) = match (dx, dy) {
-            (1, _) => (
-                (tx * TILE + 15, ty * TILE + k),
-                ((tx + 1) * TILE, ty * TILE + k),
-            ),
-            (-1, _) => ((tx * TILE, ty * TILE + k), (tx * TILE - 1, ty * TILE + k)),
-            (_, 1) => (
-                (tx * TILE + k, ty * TILE + 15),
-                (tx * TILE + k, (ty + 1) * TILE),
-            ),
-            _ => ((tx * TILE + k, ty * TILE), (tx * TILE + k, ty * TILE - 1)),
-        };
-        if map.comp_of(a.0, a.1) == Some(c)
-            && let Some(nc) = map.comp_of(b.0, b.1)
-        {
-            f(nc);
+fn for_each_link(map: &Map, t: u32, c: u8, _nt: u32, dx: i32, dy: i32, mut f: impl FnMut(u8)) {
+    let dir = match (dx, dy) {
+        (1, _) => 0,
+        (-1, _) => 1,
+        (_, 1) => 2,
+        _ => 3,
+    };
+    let row = (map.tile_links(t, dir) >> (c * 4)) & 0xf;
+    for b in 0..4u8 {
+        if row & (1 << b) != 0 {
+            f(b);
         }
     }
+}
+
+/// Output and scratch of one flow tile build, reused every tick.
+struct JobBuf {
+    dirs: [u8; 256],
+    heap: SmallHeap,
 }
 
 /// A small fixed-capacity binary min-heap, so tile builds never allocate.
@@ -821,8 +907,10 @@ fn build_tile(
     g: u8,
     t: u32,
     out: &mut [u8; 256],
+    heap: &mut SmallHeap,
 ) {
     out.fill(0);
+    heap.len = 0;
     let goal = &fs.goals[g as usize];
     let (tx, ty) = (t & (map.tdim - 1), t >> map.tshift);
     let (cx0, cy0) = (tx * TILE, ty * TILE);
@@ -854,7 +942,6 @@ fn build_tile(
     // border_dir[i]: heading + 1 toward the downhill tile that seeded cell i.
     let mut border_dir = [0u8; 256];
     let mut goal_cell = [false; 256];
-    let mut heap = SmallHeap::new();
     let r2 = goal.radius * goal.radius;
     for i in 0..256usize {
         if comp[i] == u8::MAX {

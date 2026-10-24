@@ -48,6 +48,9 @@ pub struct MixedTile {
     pub ncomp: u8,
     /// Region component of each tile component.
     pub rc: [u8; MAX_COMP],
+    /// Connectivity across each border (+x, -x, +y, -y): bit `a * 4 + b` is
+    /// set when component `a` here touches component `b` of the neighbour.
+    pub links: [u16; 4],
 }
 
 impl MixedTile {
@@ -359,6 +362,7 @@ impl Map {
                             labels: NO_LABELS,
                             ncomp,
                             rc: [NO_RC; MAX_COMP],
+                            links: [0; 4],
                         },
                         lists,
                         if ncomp > 1 { Some(labels) } else { None },
@@ -424,6 +428,7 @@ impl Map {
             areas: Vec::new(),
             props: def.props.clone(),
         };
+        map.build_links();
         map.build_regions();
         map.resolve_places(def);
         Ok(map)
@@ -518,6 +523,72 @@ impl Map {
     pub fn region_of_tile(&self, t: u32) -> u32 {
         let (tx, ty) = (t & (self.tdim - 1), t >> self.tshift);
         (ty / REGION) * self.rdim + tx / REGION
+    }
+
+    /// The tile across border `dir` (+x, -x, +y, -y) of `t`.
+    #[inline]
+    pub fn neighbour_tile(&self, t: u32, dir: usize) -> Option<u32> {
+        let (tx, ty) = (t & (self.tdim - 1), t >> self.tshift);
+        let (nx, ny) = match dir {
+            0 => (tx.checked_add(1)?, ty),
+            1 => (tx.checked_sub(1)?, ty),
+            2 => (tx, ty.checked_add(1)?),
+            _ => (tx, ty.checked_sub(1)?),
+        };
+        (nx < self.tdim && ny < self.tdim).then(|| self.tile_index(nx, ny))
+    }
+
+    /// Which components of `t` touch which components of its neighbour
+    /// across border `dir`: bit `a * 4 + b`.
+    #[inline]
+    pub fn tile_links(&self, t: u32, dir: usize) -> u16 {
+        let Some(nt) = self.neighbour_tile(t, dir) else {
+            return 0;
+        };
+        match (self.tiles[t as usize], self.tiles[nt as usize]) {
+            (BLOCKED, _) | (_, BLOCKED) => 0,
+            (OPEN, OPEN) => 1,
+            (OPEN, m) => transpose_links(self.mixed[m as usize].links[dir ^ 1]),
+            (m, _) => self.mixed[m as usize].links[dir],
+        }
+    }
+
+    fn build_links(&mut self) {
+        let mut out: Vec<(usize, [u16; 4])> = Vec::with_capacity(self.mixed.len());
+        for t in 0..self.tiles.len() as u32 {
+            let m = self.tiles[t as usize];
+            if m == OPEN || m == BLOCKED {
+                continue;
+            }
+            let (tx, ty) = (t & (self.tdim - 1), t >> self.tshift);
+            let mut links = [0u16; 4];
+            for (dir, l) in links.iter_mut().enumerate() {
+                if self.neighbour_tile(t, dir).is_none() {
+                    continue;
+                }
+                for k in 0..TILE {
+                    let (a, b) = match dir {
+                        0 => (
+                            (tx * TILE + 15, ty * TILE + k),
+                            ((tx + 1) * TILE, ty * TILE + k),
+                        ),
+                        1 => ((tx * TILE, ty * TILE + k), (tx * TILE - 1, ty * TILE + k)),
+                        2 => (
+                            (tx * TILE + k, ty * TILE + 15),
+                            (tx * TILE + k, (ty + 1) * TILE),
+                        ),
+                        _ => ((tx * TILE + k, ty * TILE), (tx * TILE + k, ty * TILE - 1)),
+                    };
+                    if let (Some(ca), Some(cb)) = (self.comp_of(a.0, a.1), self.comp_of(b.0, b.1)) {
+                        *l |= 1 << (ca * 4 + cb);
+                    }
+                }
+            }
+            out.push((m as usize, links));
+        }
+        for (m, links) in out {
+            self.mixed[m].links = links;
+        }
     }
 
     /// Wall segments near a point: the list of the 4 m sub-cell containing it.
@@ -889,6 +960,20 @@ impl Map {
             + self.rnodes.len() * std::mem::size_of::<RegionNode>()
             + self.radj.len() * 8
     }
+}
+
+/// Swap the roles of the two tiles in a link mask.
+#[inline]
+pub fn transpose_links(m: u16) -> u16 {
+    let mut out = 0;
+    for a in 0..4 {
+        for b in 0..4 {
+            if m & (1 << (a * 4 + b)) != 0 {
+                out |= 1 << (b * 4 + a);
+            }
+        }
+    }
+    out
 }
 
 /// Squared distance between a segment and an axis-aligned box.

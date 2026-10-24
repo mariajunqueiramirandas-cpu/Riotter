@@ -427,6 +427,7 @@ fn deploy_at(w: &mut World, s: usize, at: Vec2) {
             stable_id: stable,
         });
         w.slot_of[stable as usize] = i as u32;
+        w.issued = w.issued.max(stable + 1);
         let c = &mut w.cold[stable as usize];
         c.appearance = appearance_for(arch, r, item).0;
         c.item = item as u8;
@@ -578,7 +579,7 @@ fn clusters(w: &mut World) {
         }
         let dens = f.layer(slot, Layer::Dens);
         for (cell, &d) in dens.iter().enumerate() {
-            if d >= 2.0 {
+            if d >= 1.0 {
                 lab[cell] = p.cells.len() as u32;
                 p.parent.push(p.cells.len() as u32);
                 p.cells.push((slot as u32, cell as u32, c));
@@ -626,8 +627,8 @@ fn clusters(w: &mut World) {
         }
     }
     // Accumulate per root, roots in index order.
-    let mut acc: [(u32, f64, f64, f64, f64, f64, u32); MAX_CLUSTERS * 4] =
-        [(u32::MAX, 0.0, 0.0, 0.0, 0.0, 0.0, 0); MAX_CLUSTERS * 4];
+    let mut acc: [(u32, f64, f64, f64, f64, f64, u32, f64); MAX_CLUSTERS * 4] =
+        [(u32::MAX, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0.0); MAX_CLUSTERS * 4];
     let mut nacc = 0usize;
     for k in 0..p.cells.len() {
         let root = find(&mut p.parent, k as u32);
@@ -642,7 +643,7 @@ fn clusters(w: &mut World) {
         let e = match acc[..nacc].iter().position(|a| a.0 == root) {
             Some(e) => e,
             None if nacc < acc.len() => {
-                acc[nacc] = (root, 0.0, 0.0, 0.0, 0.0, 0.0, 0);
+                acc[nacc] = (root, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0.0);
                 nacc += 1;
                 nacc - 1
             }
@@ -652,7 +653,8 @@ fn clusters(w: &mut World) {
         a.1 += d;
         a.2 += x as f64 * d;
         a.3 += y as f64 * d;
-        a.4 += f.layer(slot as usize, Layer::Anger)[cell as usize] as f64 * d;
+        a.4 += f.layer(slot as usize, Layer::Anger)[cell as usize] as f64;
+        a.7 += f.layer(slot as usize, Layer::Weight)[cell as usize] as f64;
         a.5 += f.layer(slot as usize, Layer::Threat)[cell as usize] as f64;
         a.6 += 1;
     }
@@ -672,7 +674,7 @@ fn clusters(w: &mut World) {
             centroid: Vec2::new((a.2 / a.1) as f32, (a.3 / a.1) as f32),
             count: a.1 as f32,
             radius: (area / core::f32::consts::PI).sqrt(),
-            anger: (a.4 / a.1) as f32,
+            anger: (a.4 / a.7.max(1e-3)) as f32,
             threat: a.5 as f32,
             cells: a.6,
         });

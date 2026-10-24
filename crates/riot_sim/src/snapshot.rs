@@ -252,7 +252,9 @@ pub struct FieldSnap {
     pub half: f32,
     /// Chunk coordinates, one per captured chunk.
     pub chunks: Vec<[u16; 2]>,
-    /// Row-major cells of each chunk, `chunk_cells²` bytes per chunk.
+    /// Row-major cells of each chunk, `chunk_cells²` bytes per chunk, in
+    /// `chunks` order. A layer with nothing in it anywhere is left empty
+    /// (length 0) instead: use [`FieldSnap::layer`].
     pub gas: Vec<u8>,
     pub smoke: Vec<u8>,
     pub fire: Vec<u8>,
@@ -298,6 +300,15 @@ pub struct Snapshot {
     pub squads: Vec<SnapSquad>,
     pub fields: FieldSnap,
     pub stats: SnapStats,
+}
+
+impl FieldSnap {
+    /// The cells of chunk number `k` (in `chunks` order) of a layer, or
+    /// `None` when the layer is empty.
+    pub fn layer<'a>(&self, layer: &'a [u8], k: usize) -> Option<&'a [u8]> {
+        let n = (self.chunk_cells * self.chunk_cells) as usize;
+        layer.get(k * n..(k + 1) * n)
+    }
 }
 
 impl Snapshot {

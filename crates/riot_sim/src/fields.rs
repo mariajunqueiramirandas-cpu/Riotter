@@ -34,7 +34,8 @@ pub const NO_CHUNK: u32 = u32::MAX;
 pub enum Layer {
     /// People per cell (u16 count stored as f32).
     Dens = 0,
-    /// Mean fear of the local crowd, smoothed in space and time.
+    /// Fear of the local crowd, smoothed in space and time (a sum: divide
+    /// by `Weight` for the mean).
     Fear = 1,
     Anger = 2,
     /// Officers and violence.
@@ -54,9 +55,12 @@ pub enum Layer {
     Fuel = 10,
     /// Walkable fraction of the cell (static, set on activation).
     Open = 11,
+    /// Civilians per cell, smoothed like `Fear` and `Anger`: those two hold
+    /// smoothed sums, so `Fear / Weight` is the local mean (DESIGN §8).
+    Weight = 12,
 }
 
-pub const LAYERS: usize = 12;
+pub const LAYERS: usize = 13;
 
 pub struct Fields {
     pub geom: GridGeom,
@@ -76,6 +80,10 @@ pub struct Fields {
     pub people_in: Vec<u32>,
     pub pinned: Vec<bool>,
     pub slot_runs: Vec<[u32; 2]>,
+    /// Cells of each slot that hold people this tick, so the next scatter
+    /// clears only those instead of whole layers.
+    written: Vec<u16>,
+    written_n: Vec<u16>,
     /// Chunks to activate at the start of the next update.
     pub want: Vec<u32>,
     pub active: u32,
@@ -102,6 +110,8 @@ impl Fields {
             people_in: vec![0; pool],
             pinned: vec![false; pool],
             slot_runs: vec![[0; 2]; pool],
+            written: vec![0; pool * CL],
+            written_n: vec![0; pool],
             want: Vec::with_capacity(pool * 4),
             active: 0,
             overflow: 0,
@@ -167,6 +177,7 @@ impl Fields {
         self.table[c as usize] = slot as u16;
         self.slot_chunk[slot] = c;
         self.idle[slot] = 0;
+        self.written_n[slot] = 0;
         self.active += 1;
         let o = slot * LAYERS * CL;
         self.data[o..o + LAYERS * CL].fill(0.0);
@@ -204,18 +215,39 @@ impl Fields {
     // Sampling
 
     /// Bilinear sample: values change smoothly as someone walks.
+    #[inline]
     pub fn sample(&self, l: Layer, x: f32, y: f32) -> f32 {
-        let (fx, fy) = self.geom.to_cell_f(x, y);
-        let (fx, fy) = (fx - 0.5, fy - 0.5);
-        let (x0, y0) = (fx.floor(), fy.floor());
-        let (tx, ty) = (fx - x0, fy - y0);
-        let (x0, y0) = (x0 as i32, y0 as i32);
-        let v = |cx: i32, cy: i32| self.cell_value(l, cx, cy);
-        let a = v(x0, y0) * (1.0 - tx) + v(x0 + 1, y0) * tx;
-        let b = v(x0, y0 + 1) * (1.0 - tx) + v(x0 + 1, y0 + 1) * tx;
-        a * (1.0 - ty) + b * ty
+        self.probe(x, y).get(self, l)
     }
 
+    /// Locate the four cells around a point once, to sample several layers
+    /// (and their gradients) with one chunk lookup.
+    #[inline]
+    pub fn probe(&self, x: f32, y: f32) -> Probe {
+        let (fx, fy) = self.geom.to_cell_f(x, y);
+        let (fx, fy) = (fx - 0.5, fy - 0.5);
+        let (x0f, y0f) = (fx.floor(), fy.floor());
+        let (tx, ty) = (fx - x0f, fy - y0f);
+        let (x0, y0) = (x0f as i32, y0f as i32);
+        let (lx, ly) = (x0 & (CC as i32 - 1), y0 & (CC as i32 - 1));
+        let fast = x0 >= 0 && y0 >= 0 && lx < CC as i32 - 1 && ly < CC as i32 - 1;
+        let slot = if fast {
+            match self.slot_of_chunk(x0 >> 6, y0 >> 6) {
+                Some(s) => s as u32,
+                None => Probe::EMPTY,
+            }
+        } else {
+            Probe::SLOW
+        };
+        Probe {
+            slot,
+            cell: (ly * CC as i32 + lx) as u32,
+            x0,
+            y0,
+            tx,
+            ty,
+        }
+    }
     /// Value of one field cell (0 where no chunk is active).
     #[inline]
     pub fn cell_value(&self, l: Layer, cx: i32, cy: i32) -> f32 {
@@ -232,12 +264,10 @@ impl Fields {
         self.cell_value(l, fx.floor() as i32, fy.floor() as i32)
     }
 
-    /// Gradient (per metre) by central differences of bilinear samples.
+    /// Gradient (per metre) of the bilinear interpolant at `p`.
+    #[inline]
     pub fn gradient(&self, l: Layer, p: Vec2) -> Vec2 {
-        let h = FIELD_CELL;
-        let gx = self.sample(l, p.x + h, p.y) - self.sample(l, p.x - h, p.y);
-        let gy = self.sample(l, p.x, p.y + h) - self.sample(l, p.x, p.y - h);
-        Vec2::new(gx, gy) * (0.5 / h)
+        self.probe(p.x, p.y).grad(self, l)
     }
 
     /// Add `v` (falling off linearly) to every cell within `r` of `p`,
@@ -307,15 +337,30 @@ impl Fields {
 
     /// Scatter people into their cells: a segmented reduction over the field
     /// index runs. Parallel over chunks; each cell is written by one task.
-    pub fn scatter(&mut self, sp: &Spatial, p: &People, tun: &Tunables, threat_tick: bool) {
-        let (blend, decay) = (tun.field_blend, tun.field_decay);
+    /// On emotion ticks, `Fear`, `Anger` and `Weight` move toward this
+    /// tick's per-cell sums.
+    pub fn scatter(
+        &mut self,
+        sp: &Spatial,
+        p: &People,
+        tun: &Tunables,
+        threat_tick: bool,
+        emo_tick: bool,
+    ) {
+        let keep = 1.0 - tun.field_blend.clamp(0.0, 1.0);
+        let gain = 1.0 - keep;
         let (t_decay, t_officer) = (tun.threat_decay, tun.threat_officer);
         let slot_runs = &self.slot_runs;
         let slot_chunk = &self.slot_chunk;
         self.data
             .par_chunks_mut(LAYERS * CL)
+            .zip(
+                self.written
+                    .par_chunks_mut(CL)
+                    .zip(self.written_n.par_iter_mut()),
+            )
             .enumerate()
-            .for_each(|(slot, d)| {
+            .for_each(|(slot, (d, (written, written_n)))| {
                 if slot_chunk[slot] == NO_CHUNK {
                     return;
                 }
@@ -326,14 +371,21 @@ impl Fields {
                 let (_gas, rest) = rest.split_at_mut(CL);
                 let (_smoke, rest) = rest.split_at_mut(CL);
                 let (_chant, rest) = rest.split_at_mut(CL);
-                let (injured, _) = rest.split_at_mut(CL);
-                dens.fill(0.0);
-                injured.fill(0.0);
-                for f in fear.iter_mut() {
-                    *f *= decay;
+                let (injured, rest) = rest.split_at_mut(CL);
+                let weight =
+                    &mut rest[(Layer::Weight as usize - Layer::Injured as usize - 1) * CL..][..CL];
+                for &c in &written[..*written_n as usize] {
+                    dens[c as usize] = 0.0;
+                    injured[c as usize] = 0.0;
                 }
-                for a in anger.iter_mut() {
-                    *a *= decay;
+                *written_n = 0;
+                if emo_tick {
+                    for ((f, a), w) in fear.iter_mut().zip(anger.iter_mut()).zip(weight.iter_mut())
+                    {
+                        *f *= keep;
+                        *a *= keep;
+                        *w *= keep;
+                    }
                 }
                 if threat_tick {
                     for t in threat.iter_mut() {
@@ -362,11 +414,13 @@ impl Fields {
                     }
                     dens[cell] = n as f32;
                     injured[cell] = inj as f32;
+                    written[*written_n as usize] = cell as u16;
+                    *written_n += 1;
                     let civ = n - off;
-                    if civ > 0 {
-                        let inv = 1.0 / (civ as f32 * 255.0);
-                        fear[cell] += blend * (sf as f32 * inv - fear[cell]);
-                        anger[cell] += blend * (sa as f32 * inv - anger[cell]);
+                    if emo_tick && civ > 0 {
+                        fear[cell] += gain * sf as f32 * (1.0 / 255.0);
+                        anger[cell] += gain * sa as f32 * (1.0 / 255.0);
+                        weight[cell] += gain * civ as f32;
                     }
                     if threat_tick && off > 0 {
                         threat[cell] += t_officer * off as f32;
@@ -377,8 +431,16 @@ impl Fields {
 
     /// Separable 5-tap filter of one layer, with a 2-cell halo from the
     /// neighbouring chunks: rows `data → tmp`, then columns `tmp → data`,
-    /// times `decay`. `kx`/`ky` are kernels at offsets -2..=2.
-    pub fn filter(&mut self, l: Layer, kx: [f32; 5], ky: [f32; 5], decay: f32, mask_open: bool) {
+    /// times `decay`. `kx`/`ky` are kernels at offsets -2..=2. Returns the
+    /// largest value left in the layer.
+    pub fn filter(
+        &mut self,
+        l: Layer,
+        kx: [f32; 5],
+        ky: [f32; 5],
+        decay: f32,
+        mask_open: bool,
+    ) -> f32 {
         let li = l as usize;
         let open_i = Layer::Open as usize;
         {
@@ -432,10 +494,10 @@ impl Fields {
         self.data
             .par_chunks_mut(LAYERS * CL)
             .enumerate()
-            .for_each(|(slot, d)| {
+            .map(|(slot, d)| {
                 let c = slot_chunk[slot];
                 if c == NO_CHUNK {
-                    return;
+                    return 0.0f32;
                 }
                 let (cx, cy) = (c % cdim, c / cdim);
                 let nb = |dy: i32| -> Option<usize> {
@@ -458,9 +520,13 @@ impl Fields {
                         me[y as usize * CC + x]
                     }
                 };
-                let (head, tail) = d.split_at_mut(open_i * CL);
-                let open = &tail[..CL];
-                let out = &mut head[li * CL..(li + 1) * CL];
+                let (out, open): (&mut [f32], &[f32]) = if li < open_i {
+                    let (head, tail) = d.split_at_mut(open_i * CL);
+                    (&mut head[li * CL..(li + 1) * CL], &tail[..CL])
+                } else {
+                    let (head, tail) = d.split_at_mut(li * CL);
+                    (&mut tail[..CL], &head[open_i * CL..(open_i + 1) * CL])
+                };
                 for y in 0..CC as i32 {
                     if (2..CC as i32 - 2).contains(&y) {
                         let r = |k: i32| &me[(y + k) as usize * CC..(y + k + 1) as usize * CC];
@@ -490,7 +556,9 @@ impl Fields {
                         *v *= *o;
                     }
                 }
-            });
+                out.iter().fold(0.0f32, |m, &v| m.max(v.abs()))
+            })
+            .reduce(|| 0.0f32, f32::max)
     }
 
     /// Release chunks with no people, no emitters and nothing left; ask for
@@ -572,6 +640,65 @@ impl Fields {
     }
 }
 
+/// The four field cells around a point and its bilinear weights.
+#[derive(Clone, Copy, Debug)]
+pub struct Probe {
+    /// Pool slot when all four cells are in one active chunk, `EMPTY` when
+    /// that chunk is inactive, `SLOW` when the cells straddle chunks.
+    slot: u32,
+    cell: u32,
+    x0: i32,
+    y0: i32,
+    tx: f32,
+    ty: f32,
+}
+
+impl Probe {
+    const EMPTY: u32 = u32::MAX;
+    const SLOW: u32 = u32::MAX - 1;
+
+    #[inline]
+    fn corners(&self, f: &Fields, l: Layer) -> [f32; 4] {
+        match self.slot {
+            Probe::EMPTY => [0.0; 4],
+            Probe::SLOW => [
+                f.cell_value(l, self.x0, self.y0),
+                f.cell_value(l, self.x0 + 1, self.y0),
+                f.cell_value(l, self.x0, self.y0 + 1),
+                f.cell_value(l, self.x0 + 1, self.y0 + 1),
+            ],
+            s => {
+                let b = (s as usize * LAYERS + l as usize) * CL + self.cell as usize;
+                let d = &f.data[b..b + CC + 2];
+                [d[0], d[1], d[CC], d[CC + 1]]
+            }
+        }
+    }
+
+    #[inline]
+    pub fn get(&self, f: &Fields, l: Layer) -> f32 {
+        if self.slot == Probe::EMPTY {
+            return 0.0;
+        }
+        let [a, b, c, d] = self.corners(f, l);
+        let top = a + (b - a) * self.tx;
+        let bot = c + (d - c) * self.tx;
+        top + (bot - top) * self.ty
+    }
+
+    /// Gradient per metre.
+    #[inline]
+    pub fn grad(&self, f: &Fields, l: Layer) -> Vec2 {
+        if self.slot == Probe::EMPTY {
+            return Vec2::ZERO;
+        }
+        let [a, b, c, d] = self.corners(f, l);
+        let gx = (b - a) * (1.0 - self.ty) + (d - c) * self.ty;
+        let gy = (c - a) * (1.0 - self.tx) + (d - b) * self.tx;
+        Vec2::new(gx, gy) * (1.0 / FIELD_CELL)
+    }
+}
+
 /// 3-tap blur `[a, 1-2a, a]` as a 5-tap kernel.
 pub fn blur_kernel(a: f32) -> [f32; 5] {
     [0.0, a, 1.0 - 2.0 * a, a, 0.0]
@@ -630,23 +757,41 @@ pub fn absorb(f: &Fields, p: &mut People, sp: &Spatial, ap: &AbsorbParams) {
                 }
                 let a = &ap.arch[ss[k][stat::ARCH] as usize];
                 let officer = Archetype::from_u8(ss[k][stat::ARCH]).is_officer();
-                let (x, y) = (px[i], py[i]);
+                let pr = f.probe(px[i], py[i]);
                 let e = &mut es[k];
                 let mut fear = widen_u8(e[emo::FEAR]);
                 let mut anger = widen_u8(e[emo::ANGER]);
                 let mut morale = widen_u8(e[emo::MORALE]);
                 let mut fatigue = widen_u8(e[emo::FATIGUE]);
                 let mut hp = widen_u8(ss[k][stat::HEALTH]);
+                let w = pr.get(f, Layer::Weight);
+                let threat = (pr.get(f, Layer::Threat) * 0.1).min(1.0);
                 if !officer {
-                    let ff = f.sample(Layer::Fear, x, y);
-                    let fa = f.sample(Layer::Anger, x, y);
-                    fear += tun.contagion_fear * (ff - fear);
-                    anger += tun.contagion_anger * (fa - anger);
-                    let chant = f.sample(Layer::Chant, x, y);
+                    if w > 0.05 {
+                        let inv = 1.0 / w;
+                        let ff = pr.get(f, Layer::Fear) * inv;
+                        let fa = pr.get(f, Layer::Anger) * inv;
+                        fear += tun.contagion_fear * (ff - fear);
+                        // Anger catches more easily than it calms.
+                        let ka = if fa > anger {
+                            tun.contagion_anger
+                        } else {
+                            tun.contagion_anger * 0.3
+                        };
+                        anger += ka * (fa - anger);
+                    }
+                    let chant = pr.get(f, Layer::Chant);
                     morale += tun.chant_morale * chant.min(2.0);
                     fear -= 0.5 * tun.chant_morale * chant.min(2.0);
+                    // Police and violence nearby: the timid fear it, the willing are angered.
+                    fear += tun.threat_fear * threat * (1.0 - a.violence);
+                    anger += tun.threat_anger * threat * (a.violence + 0.1);
+                } else if w > 0.05 {
+                    // A hostile crowd frightens officers.
+                    let hostile = pr.get(f, Layer::Anger) / w * (w * 0.25).min(1.0);
+                    fear += tun.threat_fear * 0.5 * hostile * (1.0 - a.violence);
                 }
-                let gas = f.sample(Layer::Gas, x, y);
+                let gas = pr.get(f, Layer::Gas);
                 if gas > 0.01 {
                     let g = gas.min(4.0) * if officer { 0.25 } else { 1.0 };
                     fear += tun.gas_fear * g;
@@ -656,7 +801,7 @@ pub fn absorb(f: &Fields, p: &mut People, sp: &Spatial, ap: &AbsorbParams) {
                         ss[k][stat::FLAGS] |= flag::URGENT;
                     }
                 }
-                let fire = f.sample(Layer::Fire, x, y);
+                let fire = pr.get(f, Layer::Fire);
                 if fire > 0.05 {
                     hp -= tun.fire_damage * fire;
                     fear += 0.05 * fire;

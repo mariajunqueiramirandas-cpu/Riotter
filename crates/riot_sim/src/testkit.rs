@@ -72,6 +72,21 @@ pub fn district(size: f32, block: f32) -> MapDef {
         pos: [square_r * 0.6, 0.0],
         radius: 4.0,
     });
+    // Inner entries on the avenues just around the square.
+    let inner = 2.0 * block;
+    for (name, pos) in [
+        ("inner_w", [-inner, 0.0]),
+        ("inner_e", [inner, 0.0]),
+        ("inner_n", [0.0, -inner]),
+        ("inner_s", [0.0, inner]),
+    ] {
+        entries.push(EntryDef {
+            name: name.into(),
+            kind: EntryKind::Bus,
+            pos,
+            radius: 10.0,
+        });
+    }
     // Roads along the street grid.
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
@@ -244,4 +259,20 @@ pub fn packed(size: f32, people: u32, seed: u64) -> (MapDef, RiotSetup) {
         ..Default::default()
     };
     (map, setup)
+}
+
+/// `people` arriving through the entries around the square within a minute,
+/// marching to it: the same crowd whatever the map size (DESIGN §19
+/// map-size test).
+pub fn central(map: &MapDef, people: u32, seed: u64) -> RiotSetup {
+    let mut s = march(map, people, 8, seed);
+    s.arrivals = ["inner_w", "inner_e", "inner_n", "inner_s"]
+        .iter()
+        .map(|e| Arrival::new(e, 0.0, 1.0, 1.0))
+        .collect();
+    s.police.squads.iter_mut().for_each(|q| {
+        q.staging = Some("staging_north".into());
+        q.available_min = 0.0;
+    });
+    s
 }

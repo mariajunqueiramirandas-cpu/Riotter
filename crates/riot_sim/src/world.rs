@@ -29,6 +29,8 @@ use crate::think::Minds;
 use crate::tunables::Tunables;
 
 pub const MAX_OBJECTIVES: usize = OBJECTIVE_GOALS;
+/// Stable ids kept free for `DebugCommand::Spawn`.
+pub const DEBUG_RESERVE: usize = 1024;
 pub const NO_SLOT: u32 = u32::MAX;
 
 /// The phases of a tick, for profiling (DESIGN §3.1).
@@ -259,8 +261,13 @@ pub struct World {
     pub(crate) stat_scratch: Vec<[u8; 4]>,
     schedule: Vec<SpawnRec>,
     next_spawn: usize,
-    /// Stable ids issued so far.
+    /// One past the highest stable id ever on the map: the snapshot's length.
     pub issued: u32,
+    /// Stable ids planned by the setup (officers, organizers, crowd).
+    pub planned: u32,
+    /// Next stable id for debug spawns, from a reserve after `planned`.
+    debug_next: u32,
+    /// Stable ids that can exist: `planned` plus the debug reserve.
     pub max_people: u32,
     pub internet: bool,
     /// Entries the state has closed (metro stations).
@@ -308,10 +315,11 @@ impl World {
             }
         }
         let crowd_total: usize = crowd.iter().map(|&c| c as usize).sum();
-        let max_people = officers + organizers + crowd_total;
-        if max_people > 65_000 {
-            return Err(SetupError::TooManyPeople(max_people));
+        let planned = officers + organizers + crowd_total;
+        if planned + DEBUG_RESERVE > 65_000 {
+            return Err(SetupError::TooManyPeople(planned));
         }
+        let max_people = planned + DEBUG_RESERVE;
         let cap_people = max_people.max(1) + 64;
 
         // --- arrival schedule (DESIGN §2.8): turnout is a curve, not a number
@@ -449,7 +457,9 @@ impl World {
             stat_scratch: vec![[0; 4]; cap],
             schedule: recs,
             next_spawn: 0,
-            issued: officers as u32,
+            issued: 0,
+            planned: planned as u32,
+            debug_next: planned as u32,
             max_people: max_people as u32,
             internet: setup.comms.mode != crate::setup::CommsMode::Shutdown,
             entry_closed: vec![false; map.entries.len()],
@@ -634,7 +644,7 @@ impl World {
                 radius,
             } => {
                 for k in 0..count as u32 {
-                    if self.issued >= self.max_people || self.people.len >= self.people.cap {
+                    if self.debug_next >= self.max_people || self.people.len >= self.people.cap {
                         self.extend_capacity_note();
                         break;
                     }
@@ -642,8 +652,8 @@ impl World {
                     let off = Vec2::from_heading((r >> 8) as u8) * (radius * unit(r).sqrt());
                     let p = Vec2::new(x, y) + off;
                     let p = self.map.nearest_open(p, 8.0).unwrap_or(p);
-                    let stable = self.issued;
-                    self.issued += 1;
+                    let stable = self.debug_next;
+                    self.debug_next += 1;
                     self.spawn_person(stable, p, archetype as u8, 0);
                 }
             }
@@ -798,6 +808,7 @@ impl World {
             stable_id: stable,
         });
         self.slot_of[stable as usize] = i as u32;
+        self.issued = self.issued.max(stable + 1);
         let c = &mut self.cold[stable as usize];
         c.appearance = appearance_for(a, r, item).0;
         c.home = entry;
@@ -854,16 +865,26 @@ impl World {
         let t = self.tun;
         self.fields.activate_for_tick(&self.spatial, &self.map);
         crate::hazards::pin_emitters(self);
+        // Multi-rate layers (DESIGN §8): emotions every 2 ticks, threat every 4.
         let threat_tick = tick % 4 == 0;
-        self.fields
-            .scatter(&self.spatial, &self.people, &self.tun, threat_tick);
+        let emo_tick = tick % 2 == 0;
+        self.fields.scatter(
+            &self.spatial,
+            &self.people,
+            &self.tun,
+            threat_tick,
+            emo_tick,
+        );
         crate::messages::stamp_chants(self);
         if tick % 10 == 0 {
             crate::hazards::stamp_cameras(self);
         }
         let blur = crate::fields::blur_kernel(t.field_diffuse);
-        self.fields.filter(Layer::Fear, blur, blur, 1.0, false);
-        self.fields.filter(Layer::Anger, blur, blur, 1.0, false);
+        if emo_tick {
+            self.fields.filter(Layer::Fear, blur, blur, 1.0, false);
+            self.fields.filter(Layer::Anger, blur, blur, 1.0, false);
+            self.fields.filter(Layer::Weight, blur, blur, 1.0, false);
+        }
         if threat_tick {
             let tb = crate::fields::blur_kernel(0.2);
             self.fields.filter(Layer::Threat, tb, tb, 1.0, false);

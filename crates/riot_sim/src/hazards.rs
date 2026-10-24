@@ -45,6 +45,11 @@ pub struct Hazards {
     pub emitters: Vec<Emitter>,
     pub projectiles: Vec<Projectile>,
     pub wind: Vec2,
+    /// Gas or smoke left anywhere: when neither is, their passes are skipped.
+    pub gas_live: bool,
+    pub smoke_live: bool,
+    /// Something is burning somewhere.
+    pub fire_live: bool,
     /// Projectiles stopped by a shield or a body.
     pub blocked: u32,
     pub hits: u32,
@@ -56,6 +61,9 @@ impl Hazards {
             emitters: Vec::with_capacity(256),
             projectiles: Vec::with_capacity(setup.limits.projectiles as usize),
             wind: Vec2::new(setup.weather.wind[0], setup.weather.wind[1]),
+            gas_live: false,
+            smoke_live: false,
+            fire_live: false,
             blocked: 0,
             hits: 0,
         }
@@ -122,6 +130,7 @@ impl Hazards {
         }
         fields.stamp(Layer::Fuel, p, 2.0, fuel, map);
         fields.raise_at(Layer::Fire, p, 1.0, map);
+        self.fire_live = true;
     }
 
     pub fn hash(&self, h: &mut StateHasher) {
@@ -227,25 +236,34 @@ pub fn update_fields(w: &mut World) {
     let wind = w.hazards.wind;
     let (sx, sy) = (wind.x * DT / FIELD_CELL, wind.y * DT / FIELD_CELL);
     let a = w.tun.gas_diffuse;
-    w.fields.filter(
-        Layer::Gas,
-        blur_shift_kernel(a, sx),
-        blur_shift_kernel(a, sy),
-        w.tun.gas_decay,
-        true,
-    );
-    w.fields.filter(
-        Layer::Smoke,
-        blur_shift_kernel(a * 0.8, sx),
-        blur_shift_kernel(a * 0.8, sy),
-        w.tun.smoke_decay,
-        true,
-    );
+    if w.hazards.gas_live || !w.hazards.emitters.is_empty() {
+        let mx = w.fields.filter(
+            Layer::Gas,
+            blur_shift_kernel(a, sx),
+            blur_shift_kernel(a, sy),
+            w.tun.gas_decay,
+            true,
+        );
+        w.hazards.gas_live = mx > 1e-3;
+    }
+    if w.hazards.smoke_live {
+        let mx = w.fields.filter(
+            Layer::Smoke,
+            blur_shift_kernel(a * 0.8, sx),
+            blur_shift_kernel(a * 0.8, sy),
+            w.tun.smoke_decay,
+            true,
+        );
+        w.hazards.smoke_live = mx > 1e-3;
+    }
     fire(w, tick);
 }
 
 /// Fire as a cellular automaton on the fuel layer.
 fn fire(w: &mut World, tick: u32) {
+    if !w.hazards.fire_live {
+        return;
+    }
     let burn = w.tun.fire_burn;
     let spread = w.tun.fire_spread;
     let seed = w.seed;
@@ -276,6 +294,7 @@ fn fire(w: &mut World, tick: u32) {
                 (f0 - 0.05).max(0.0)
             };
             w.fields.layer_mut(slot, Layer::Smoke)[cell] += 0.3 * f0;
+            w.hazards.smoke_live = true;
             // Spread to neighbouring cells with fuel.
             let (lx, ly) = ((cell % CC) as i32, (cell / CC) as i32);
             for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
@@ -312,6 +331,7 @@ fn fire(w: &mut World, tick: u32) {
             }
         }
     }
+    w.hazards.fire_live = any;
     if !any {
         return;
     }

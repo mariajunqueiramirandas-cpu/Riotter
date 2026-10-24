@@ -17,7 +17,7 @@ pub fn write(w: &mut World) {
     }
     let s = &mut w.snapshot;
     s.tick = w.tick;
-    let issued = w.issued.max(w.police.officers.len() as u32) as usize;
+    let issued = w.issued as usize;
     if s.people.capacity() < w.max_people as usize {
         s.people
             .reserve_exact(w.max_people as usize - s.people.len());
@@ -181,49 +181,61 @@ pub fn write(w: &mut World) {
             fs.chunks.reserve_exact(f.pool);
         }
         let q = |x: f32, scale: f32| narrow_u8(x * scale);
+        // Layers with nothing in them stay empty (see `FieldSnap`).
+        let (gas, smoke) = (w.hazards.gas_live, w.hazards.smoke_live);
+        let fire = smoke;
+        let overlay = w.snap_cfg.overlay;
         for slot in 0..f.pool {
             let c = f.slot_chunk[slot];
             if c == NO_CHUNK {
                 continue;
             }
             fs.chunks.push([(c % f.cdim) as u16, (c / f.cdim) as u16]);
-            fs.gas
-                .extend(f.layer(slot, Layer::Gas).iter().map(|&x| q(x, 0.25)));
-            fs.smoke
-                .extend(f.layer(slot, Layer::Smoke).iter().map(|&x| q(x, 0.25)));
-            fs.fire
-                .extend(f.layer(slot, Layer::Fire).iter().map(|&x| q(x, 1.0)));
-            match w.snap_cfg.overlay {
-                Overlay::None => fs.overlay.extend(std::iter::repeat_n(0u8, CL)),
-                Overlay::Density => fs
-                    .overlay
-                    .extend(f.layer(slot, Layer::Dens).iter().map(|&x| q(x, 1.0 / 20.0))),
-                Overlay::Fear => fs
-                    .overlay
-                    .extend(f.layer(slot, Layer::Fear).iter().map(|&x| q(x, 1.0))),
-                Overlay::Anger => fs
-                    .overlay
-                    .extend(f.layer(slot, Layer::Anger).iter().map(|&x| q(x, 1.0))),
-                Overlay::Threat => fs
-                    .overlay
-                    .extend(f.layer(slot, Layer::Threat).iter().map(|&x| q(x, 0.1))),
-                Overlay::Gas => fs
-                    .overlay
-                    .extend(f.layer(slot, Layer::Gas).iter().map(|&x| q(x, 0.25))),
-                Overlay::Camera => fs
-                    .overlay
-                    .extend(f.layer(slot, Layer::Camera).iter().map(|&x| q(x, 0.1))),
-                Overlay::Messages => fs.overlay.extend(
-                    f.msg[slot * CL..(slot + 1) * CL]
-                        .iter()
-                        .map(|&m| (m >> 8) as u8),
-                ),
-                Overlay::Pressure => {
-                    // Pressure lives on bodies; show crowding instead.
-                    fs.overlay
-                        .extend(f.layer(slot, Layer::Dens).iter().map(|&x| q(x, 1.0 / 16.0)))
-                }
+            if gas {
+                fs.gas
+                    .extend(f.layer(slot, Layer::Gas).iter().map(|&x| q(x, 0.25)));
             }
+            if smoke {
+                fs.smoke
+                    .extend(f.layer(slot, Layer::Smoke).iter().map(|&x| q(x, 0.25)));
+            }
+            if fire {
+                fs.fire
+                    .extend(f.layer(slot, Layer::Fire).iter().map(|&x| q(x, 1.0)));
+            }
+            let src = match overlay {
+                Overlay::None => continue,
+                Overlay::Density | Overlay::Pressure => (Layer::Dens, 1.0 / 16.0),
+                Overlay::Fear | Overlay::Anger => {
+                    // Stored as sums: show the local mean.
+                    let l = if overlay == Overlay::Fear {
+                        Layer::Fear
+                    } else {
+                        Layer::Anger
+                    };
+                    let wt = f.layer(slot, Layer::Weight);
+                    fs.overlay.extend(
+                        f.layer(slot, l)
+                            .iter()
+                            .zip(wt)
+                            .map(|(&x, &w)| if w > 0.05 { q(x / w, 1.0) } else { 0 }),
+                    );
+                    continue;
+                }
+                Overlay::Threat => (Layer::Threat, 0.1),
+                Overlay::Gas => (Layer::Gas, 0.25),
+                Overlay::Camera => (Layer::Camera, 0.1),
+                Overlay::Messages => {
+                    fs.overlay.extend(
+                        f.msg[slot * CL..(slot + 1) * CL]
+                            .iter()
+                            .map(|&m| (m >> 8) as u8),
+                    );
+                    continue;
+                }
+            };
+            fs.overlay
+                .extend(f.layer(slot, src.0).iter().map(|&x| q(x, src.1)));
         }
     }
 

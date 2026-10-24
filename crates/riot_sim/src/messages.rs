@@ -47,6 +47,8 @@ pub struct Messages {
     /// Organizers chanting, by stable id.
     pub chanting: Vec<u32>,
     pub count: u32,
+    /// The chant layer holds something and must be cleared.
+    chant_live: bool,
 }
 
 impl Default for Messages {
@@ -64,6 +66,7 @@ impl Messages {
             announced: 0,
             chanting: Vec::with_capacity(64),
             count: 0,
+            chant_live: false,
         }
     }
 
@@ -225,10 +228,13 @@ pub fn set_chant(w: &mut World, organizer: u32, on: bool) {
 /// Chants raise morale in a radius around chanting organizers, at the cost
 /// of their own stamina (DESIGN §2.4).
 pub fn stamp_chants(w: &mut World) {
-    for slot in 0..w.fields.pool {
-        if w.fields.slot_chunk[slot] != NO_CHUNK {
-            w.fields.layer_mut(slot, Layer::Chant).fill(0.0);
+    if w.msgs.chant_live {
+        for slot in 0..w.fields.pool {
+            if w.fields.slot_chunk[slot] != NO_CHUNK {
+                w.fields.layer_mut(slot, Layer::Chant).fill(0.0);
+            }
         }
+        w.msgs.chant_live = false;
     }
     let r = w.tun.chant_radius;
     for k in 0..w.msgs.chanting.len() {
@@ -241,6 +247,7 @@ pub fn stamp_chants(w: &mut World) {
         let fat = riot_core::widen_u8(w.people.emo[i][emo::FATIGUE]);
         let strength = 1.0 - fat * 0.7;
         w.fields.stamp(Layer::Chant, p, r, strength, &w.map);
+        w.msgs.chant_live = true;
         w.people.emo[i][emo::FATIGUE] = riot_core::narrow_u8(fat + w.tun.chant_cost);
     }
 }
@@ -358,14 +365,18 @@ fn stamp_max(f: &mut Fields, p: Vec2, r: f32, v: u16) {
     }
 }
 
-/// 3 × 3 max filter with a hop's fidelity loss, across chunk borders.
+/// One hop of word of mouth: fidelity drops by `hop`, and a message that
+/// fades out entirely is gone. Branch-free so the passes vectorize.
+#[inline]
+fn lose(v: u16, hop: u16) -> u16 {
+    let keep = ((v >> 8) > hop) as u16;
+    v.wrapping_sub(hop << 8) * keep
+}
+
+/// 3 × 3 max filter with a hop's fidelity loss, across chunk borders: rows
+/// `msg → msg_tmp`, then columns `msg_tmp → msg`.
 fn dilate(f: &mut Fields, hop: u16) {
-    let lose = |v: u16| -> u16 {
-        let fid = (v >> 8).saturating_sub(hop);
-        if fid == 0 { 0 } else { (fid << 8) | (v & 0xff) }
-    };
     let cdim = f.cdim;
-    // Rows: msg → msg_tmp.
     {
         let (msg, table, slot_chunk) = (&f.msg, &f.table, &f.slot_chunk);
         f.msg_tmp
@@ -387,24 +398,18 @@ fn dilate(f: &mut Fields, hop: u16) {
                 };
                 let (l, r) = (nb(-1), nb(1));
                 let me = &msg[slot * CL..(slot + 1) * CL];
+                let mut row = [0u16; CC + 2];
                 for y in 0..CC {
+                    row[1..CC + 1].copy_from_slice(&me[y * CC..(y + 1) * CC]);
+                    row[0] = l.map_or(0, |s| msg[s * CL + y * CC + CC - 1]);
+                    row[CC + 1] = r.map_or(0, |s| msg[s * CL + y * CC]);
+                    let o = &mut out[y * CC..(y + 1) * CC];
                     for x in 0..CC {
-                        let left = if x > 0 {
-                            me[y * CC + x - 1]
-                        } else {
-                            l.map_or(0, |s| msg[s * CL + y * CC + CC - 1])
-                        };
-                        let right = if x + 1 < CC {
-                            me[y * CC + x + 1]
-                        } else {
-                            r.map_or(0, |s| msg[s * CL + y * CC])
-                        };
-                        out[y * CC + x] = me[y * CC + x].max(lose(left)).max(lose(right));
+                        o[x] = row[x + 1].max(lose(row[x], hop)).max(lose(row[x + 2], hop));
                     }
                 }
             });
     }
-    // Columns: msg_tmp → msg.
     let (tmp, table, slot_chunk) = (&f.msg_tmp, &f.table, &f.slot_chunk);
     f.msg
         .par_chunks_mut(CL)
@@ -423,21 +428,21 @@ fn dilate(f: &mut Fields, hop: u16) {
                 let s = table[(y as u32 * cdim + cx) as usize];
                 (s != NO_SLOT).then_some(s as usize)
             };
-            let (u, d) = (nb(-1), nb(1));
+            let zero = [0u16; CC];
             let me = &tmp[slot * CL..(slot + 1) * CL];
+            let up = nb(-1).map_or(&zero[..], |s| &tmp[s * CL + (CC - 1) * CC..s * CL + CL]);
+            let down = nb(1).map_or(&zero[..], |s| &tmp[s * CL..s * CL + CC]);
             for y in 0..CC {
+                let a = if y > 0 { &me[(y - 1) * CC..y * CC] } else { up };
+                let b = &me[y * CC..(y + 1) * CC];
+                let d = if y + 1 < CC {
+                    &me[(y + 1) * CC..(y + 2) * CC]
+                } else {
+                    down
+                };
+                let o = &mut out[y * CC..(y + 1) * CC];
                 for x in 0..CC {
-                    let up = if y > 0 {
-                        me[(y - 1) * CC + x]
-                    } else {
-                        u.map_or(0, |s| tmp[s * CL + (CC - 1) * CC + x])
-                    };
-                    let down = if y + 1 < CC {
-                        me[(y + 1) * CC + x]
-                    } else {
-                        d.map_or(0, |s| tmp[s * CL + x])
-                    };
-                    out[y * CC + x] = me[y * CC + x].max(lose(up)).max(lose(down));
+                    o[x] = b[x].max(lose(a[x], hop)).max(lose(d[x], hop));
                 }
             }
         });
@@ -493,7 +498,8 @@ fn adopt(p: &mut People, cx: &AdoptCtx) {
                 }
                 let own = bs[k];
                 let stable = stable_id[i];
-                let r = roll(cx.seed, cx.tick, stable, Stream::Message);
+                // Rolled only when there is something to adopt.
+                let r = || roll(cx.seed, cx.tick, stable, Stream::Message);
                 // Word of mouth: read one cell.
                 let (gx, gy) = cx.fields.geom.cell_of(px[i], py[i]);
                 let heard = match cx
@@ -510,7 +516,7 @@ fn adopt(p: &mut People, cx: &AdoptCtx) {
                         belief::fidelity(heard) > belief::fidelity(own).saturating_add(24);
                     if belief::id(own) == 0 || newer || clearer {
                         let trust = cx.arch[a as usize].trust;
-                        if unit(r) < cx.hear_rate * (0.25 + trust) {
+                        if unit(r()) < cx.hear_rate * (0.25 + trust) {
                             take = Some(heard);
                         }
                     }
@@ -518,7 +524,7 @@ fn adopt(p: &mut People, cx: &AdoptCtx) {
                     && belief::fidelity(heard) > belief::fidelity(own).saturating_add(24)
                 {
                     // Hearing it again, more clearly.
-                    if unit(r) < cx.hear_rate {
+                    if unit(r()) < cx.hear_rate {
                         take = Some(heard);
                     }
                 }
@@ -527,7 +533,7 @@ fn adopt(p: &mut People, cx: &AdoptCtx) {
                     let latest = cx.msgs.latest;
                     if latest != 0
                         && latest != belief::id(own)
-                        && unit(r.rotate_left(29)) < cx.phone_rate
+                        && unit(r().rotate_left(29)) < cx.phone_rate
                     {
                         take = Some(belief::pack(latest, cx.phone_fid));
                     }
