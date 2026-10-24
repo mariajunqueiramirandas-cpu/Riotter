@@ -311,7 +311,43 @@ impl FieldSnap {
     }
 }
 
+/// The most a riot can put in each part of a [`Snapshot`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SnapshotSizes {
+    pub people: usize,
+    pub vehicles: usize,
+    pub projectiles: usize,
+    pub props: usize,
+    pub objectives: usize,
+    pub drops: usize,
+    pub squads: usize,
+    /// Field cells in all chunks that can be active at once.
+    pub field_cells: usize,
+    pub field_chunks: usize,
+}
+
 impl Snapshot {
+    /// Reserve every buffer for the most it can hold, so writing (and
+    /// copying) snapshots never allocates once the riot is running.
+    pub fn reserve(&mut self, n: &SnapshotSizes) {
+        fn to<T>(v: &mut Vec<T>, n: usize) {
+            v.reserve_exact(n.saturating_sub(v.len()));
+        }
+        to(&mut self.people, n.people);
+        to(&mut self.vehicles, n.vehicles);
+        to(&mut self.projectiles, n.projectiles);
+        to(&mut self.props, n.props);
+        to(&mut self.objectives, n.objectives);
+        to(&mut self.drops, n.drops);
+        to(&mut self.squads, n.squads);
+        let f = &mut self.fields;
+        to(&mut f.chunks, n.field_chunks);
+        to(&mut f.gas, n.field_cells);
+        to(&mut f.smoke, n.field_cells);
+        to(&mut f.fire, n.field_cells);
+        to(&mut f.overlay, n.field_cells);
+    }
+
     /// Copy `other` into `self`, reusing buffers (for triple buffering).
     pub fn copy_from(&mut self, other: &Snapshot) {
         self.tick = other.tick;

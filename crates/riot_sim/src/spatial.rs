@@ -153,14 +153,16 @@ impl Spatial {
         let (inv_cell, half, mask, sentinel) = (self.inv_cell, self.half, self.mask, self.sentinel);
         let (px, py) = (lanes::flat(&p.pos_x), lanes::flat(&p.pos_y));
 
-        // Per-agent scratch.
+        // Per-agent scratch, and the field key of where everyone is now.
+        let g = self.fgeom;
         self.bucket_of[..span]
             .par_chunks_mut(CHUNK_AGENTS)
             .zip(self.cell_key[..span].par_chunks_mut(CHUNK_AGENTS))
             .zip(self.radius[..span].par_chunks_mut(CHUNK_AGENTS))
             .zip(self.inv_mass[..span].par_chunks_mut(CHUNK_AGENTS))
+            .zip(self.field_key[..span].par_chunks_mut(CHUNK_AGENTS))
             .enumerate()
-            .for_each(|(c, (((bucket, key), rad), inv_m))| {
+            .for_each(|(c, ((((bucket, key), rad), inv_m), fkey))| {
                 let base = c * CHUNK_AGENTS;
                 for k in 0..bucket.len() {
                     let i = base + k;
@@ -170,8 +172,11 @@ impl Spatial {
                         key[k] = u32::MAX;
                         rad[k] = 0.0;
                         inv_m[k] = 0.0;
+                        fkey[k] = DEAD_KEY;
                         continue;
                     }
+                    let (fx, fy) = g.cell_of(px[i], py[i]);
+                    fkey[k] = morton2(fx, fy).min(DEAD_KEY - 1);
                     let a = &arch[st[stat::ARCH] as usize];
                     let down = Gait::from_u8(p.pose[i][pose::GAIT]).is_down();
                     rad[k] = a.radius;

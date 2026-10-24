@@ -4,7 +4,10 @@ use riot_sim::{Tunables, World};
 #[test]
 fn a_crowd_reaches_the_square() {
     let map = testkit::district(512.0, 64.0);
-    let setup = testkit::central(&map, 1500, 7);
+    let mut setup = testkit::central(&map, 1500, 7);
+    // Marching only: with gas allowed, radicals next to the police start a
+    // riot that disperses the square.
+    setup.escalation_cap = riot_sim::setup::Escalation::Presence;
     let mut w = World::new(&setup, &map, Tunables::default()).unwrap();
     for _ in 0..3600 {
         w.tick(&[]);

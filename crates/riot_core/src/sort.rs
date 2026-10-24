@@ -26,17 +26,25 @@ impl Buckets {
     }
 
     pub fn rebuild(&mut self, bucket_of: &[u32]) {
+        self.rebuild_in(bucket_of, self.buckets());
+    }
+
+    /// Like [`Buckets::rebuild`] using only the first `n` buckets (every
+    /// item must be below `n`), so a table sized for the worst case costs
+    /// only what is in it.
+    pub fn rebuild_in(&mut self, bucket_of: &[u32], n: usize) {
+        let n = n.min(self.buckets());
         self.order.clear();
         self.order.resize(bucket_of.len(), 0);
-        self.start.fill(0);
+        let start = &mut self.start[..n + 1];
+        start.fill(0);
         for &b in bucket_of {
-            self.start[b as usize + 1] += 1;
+            start[b as usize + 1] += 1;
         }
-        for b in 1..self.start.len() {
-            self.start[b] += self.start[b - 1];
+        for b in 1..start.len() {
+            start[b] += start[b - 1];
         }
-        self.cursor
-            .copy_from_slice(&self.start[..self.start.len() - 1]);
+        self.cursor[..n].copy_from_slice(&start[..n]);
         for (i, &b) in bucket_of.iter().enumerate() {
             let slot = &mut self.cursor[b as usize];
             self.order[*slot as usize] = i as u32;
@@ -125,6 +133,11 @@ mod tests {
         assert_eq!(b.order, [3, 1, 4, 0, 2, 5]);
         assert_eq!(b.bucket(3), &[0, 2, 5]);
         assert_eq!(b.bucket(2), &[] as &[u32]);
+        // The same items in a table of 64 using only its first 4 buckets.
+        let mut big = Buckets::new(64, of.len());
+        big.rebuild_in(&of, 4);
+        assert_eq!(big.order, b.order);
+        assert_eq!(big.bucket(3), &[0, 2, 5]);
     }
 
     #[test]

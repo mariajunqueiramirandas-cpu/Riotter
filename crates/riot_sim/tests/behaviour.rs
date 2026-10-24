@@ -219,8 +219,17 @@ fn calling_everyone_to_one_spot_crushes() {
     let fallen = (0..w.people.len)
         .filter(|&i| w.people.stat[i][stat::FLAGS] & flag::DOWN != 0)
         .count();
-    eprintln!("injuries {} fallen {fallen}", w.outcome.injuries);
-    assert!(w.outcome.injuries > 50);
+    let o = &w.outcome;
+    let crush = o.harm[riot_sim::outcome::Harm::Crush as usize];
+    eprintln!(
+        "injuries {} fallen {fallen} deaths {} crush harm {crush}",
+        o.injuries, o.deaths
+    );
+    // A crush: pressure knocks hundreds down within a minute and injures
+    // dozens, and the harm is crowd pressure, not anything else.
+    assert!(fallen > 200, "only {fallen} fell");
+    assert!(o.injuries > 30, "only {} injured", o.injuries);
+    assert!(crush > o.harm.iter().sum::<u32>() / 2, "harm {:?}", o.harm);
 }
 
 /// A broadcast reaches most of a crowd by word of mouth, faster with phones

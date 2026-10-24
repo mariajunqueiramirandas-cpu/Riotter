@@ -104,6 +104,12 @@ impl ObstacleGrid {
     pub fn rebuild(&mut self, obbs: &[Obb]) {
         self.ent_bucket.clear();
         self.ent_obj.clear();
+        // Hash into about four buckets per obstacle present, not per
+        // obstacle the scenario allows.
+        let n = (obbs.len() * 4)
+            .next_power_of_two()
+            .clamp(256, self.buckets.buckets());
+        self.mask = n as u32 - 1;
         for (k, o) in obbs.iter().enumerate() {
             let ext = o.half.x.max(o.half.y) + 0.6;
             let x0 = ((o.c.x - ext + self.half) / OBST_CELL).floor() as i32;
@@ -120,7 +126,7 @@ impl ObstacleGrid {
                 }
             }
         }
-        self.buckets.rebuild(&self.ent_bucket);
+        self.buckets.rebuild_in(&self.ent_bucket, n);
     }
 
     /// Obstacles listed in the cell containing `p` (may include a few far

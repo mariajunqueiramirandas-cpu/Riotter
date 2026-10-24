@@ -769,10 +769,17 @@ fn assign(w: &mut World) {
         if c.count < MIN_POLICED && c.threat <= 6.0 {
             continue;
         }
+        // A kettle once begun is finished, not dropped when the trouble that
+        // started it fades.
+        let kettled = w.police.squads.iter().any(|sq| {
+            sq.doctrine == Doctrine::Kettle && (sq.cluster_at - c.centroid).len() < c.radius + 30.0
+        });
+        let ring_it =
+            rung >= Escalation::LinesAndKettles && (violent || kettled) && c.count < 1500.0;
         // Enough squads for the crowd, and to ring it if it may be kettled:
         // officers at most 1.4 m apart around its packed radius.
         let mut want = (c.count / 350.0).ceil() as usize;
-        if rung >= Escalation::LinesAndKettles && violent && c.count < 1500.0 {
+        if ring_it {
             let packed_r = (c.count / (2.5 * core::f32::consts::PI)).sqrt().max(4.0);
             want = want.max((2.0 * core::f32::consts::PI * packed_r / 1.4 / 10.0).ceil() as usize);
         }
@@ -802,8 +809,7 @@ fn assign(w: &mut World) {
             picked[np] = k;
             np += 1;
         }
-        let kettle = rung >= Escalation::LinesAndKettles && violent && c.count < 1500.0 && np >= 2
-            || rung >= Escalation::MassArrests;
+        let kettle = ring_it && np >= 2 || rung >= Escalation::MassArrests;
         let n_ring = picked[..np]
             .iter()
             .filter(|&&k| w.police.squads[k].kind != SquadKind::Snatch)
@@ -1172,6 +1178,8 @@ fn update_squads(w: &mut World) {
                     let h = ((m / total) * 256.0) as u32 as u8;
                     t.pos = sq.anchor + Vec2::from_heading(h) * sq.radius;
                     t.face = sq.anchor;
+                    // Run to close the ring; walk once in place.
+                    t.run = (me - t.pos).len() > 4.0;
                 }
                 Doctrine::Snatch => {
                     t.pos = sq.anchor;

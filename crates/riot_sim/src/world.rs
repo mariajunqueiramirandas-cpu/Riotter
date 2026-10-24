@@ -500,6 +500,18 @@ impl World {
         w.retarget_exits();
         crate::police::spawn_initial(&mut w);
         w.outcome.start(&w.objectives);
+        let sizes = crate::snapshot::SnapshotSizes {
+            people: w.max_people as usize,
+            vehicles: w.police.vehicles.capacity(),
+            projectiles: w.hazards.projectiles.capacity(),
+            props: w.props.capacity(),
+            objectives: MAX_OBJECTIVES,
+            drops: w.drops.capacity(),
+            squads: w.police.squads.capacity(),
+            field_cells: w.fields.pool * crate::fields::CL,
+            field_chunks: w.fields.pool,
+        };
+        w.snapshot.reserve(&sizes);
         Ok(w)
     }
 
