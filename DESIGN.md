@@ -1,13 +1,13 @@
 # Riotter: Riot Simulation Design
 
-Status: draft v0.2 (2026-10-24). v0.2 makes every person an individual body with exact collision, facing and pose, ready for per-person sprites.
+Status: draft v0.2 (2026-10-24). v0.2 makes every person an individual body with exact collision, facing and pose, ready for per-person sprites, and grows maps to a 4 km city centre whose size costs nothing per tick.
 
-This document covers **the real-time riot simulation only**: one district, one protest, thousands of autonomous people against a police force, with the player influencing events but never commanding them. The turn-based campaign, multiplayer, 3D, audio and UI art are out of scope. The campaign shows up only as the boundary: a `RiotSetup` goes in and a `RiotOutcome` comes out (§17).
+This document covers **the real-time riot simulation only**: one map (up to a 4 km city centre), one day of protest, thousands of autonomous people against a police force, with the player influencing events but never commanding them. The turn-based campaign, multiplayer, 3D, audio and UI art are out of scope. The campaign shows up only as the boundary: a `RiotSetup` goes in and a `RiotOutcome` comes out (§17).
 
 It has two goals, and they carry equal weight:
 
 1. **The crowd must feel alive.** It should be unpredictable in the moment, yet readable after the fact.
-2. **The simulation must be extremely fast.** The main target is 10,000 agents in about 3 ms per 20 Hz tick. The stretch target is 50,000. A 10-minute riot must auto-resolve in under 40 seconds.
+2. **The simulation must be extremely fast.** The main target is 10,000 agents in about 3 ms per 20 Hz tick, on any map size. The stretch target is 50,000. A 10-minute riot must auto-resolve in under 40 seconds, and a simulated hour in under 2 minutes.
 
 Everything below is written in service of both goals.
 
@@ -21,6 +21,7 @@ Everything below is written in service of both goals.
 4. **The simulation is the truth.** It is headless, deterministic and runs on a fixed tick. The renderer only watches.
 5. **Performance is a feature.** Bigger crowds and faster auto-resolve are gameplay. Every system has a time budget and a benchmark, and going over budget is a bug.
 6. **Bodies, not cells.** Every person is an individual body with an exact position, size, facing and pose, so every one of them can be simulated, seen and drawn as their own sprite. Grids only speed up lookups; they never decide where anyone stands.
+7. **Map size is free.** Cost grows with the number of people and how much is happening, never with the area of the map. A quiet street on the far side of the city costs nothing.
 
 ---
 
@@ -28,12 +29,13 @@ Everything below is written in service of both goals.
 
 ### 2.1 The map
 
-- A district of up to 512 × 512 m, containing streets, squares, alleys, buildings, chokepoints, entry/exit points and police staging areas.
+- A city centre of up to **4 × 4 km** (16 km², about 60 times v0.1's 512 m district). It has several squares, avenues, side streets, alleys, parks, bridges, metro stations, a government quarter and police depots. Separate protests can happen in different places on the same map, and crowds move between them.
 - Authored in **Tiled** (a free map editor) and exported as JSON:
-  - Buildings, walls, cars, bins and barriers are **polygons**. These polygons are the exact collision shapes (§11.2).
-  - Ground types (road, pavement, grass) are painted tile layers.
-  - Entries, objectives and police staging are named objects.
-- At load time, lookup grids are derived from the polygons (§7): a 0.5 m **nav grid** for routes and a 2 m **field grid** for crowd-scale effects. Neither one decides where people can stand; the polygons do.
+  - Buildings, walls, parked cars, bins and barriers are **polygons**. These polygons are the exact collision shapes (§11.2).
+  - Ground types (road, pavement, grass) are painted tile layers. Roads also form a **road graph** that vehicles drive on.
+  - Entries (metro stations, bus stops, map edges), objectives, depots and police staging points are named objects.
+- At load time, lookup structures are derived from the polygons (§7): a 0.5 m **nav grid** for routes and a 2 m **field grid** for crowd-scale effects. Neither one decides where people can stand; the polygons do. Both are stored in chunks, so a big map costs memory only where it has walls or activity.
+- Positions are `f32` metres. That gives about 0.5 mm resolution at 4 km and stays at 1 mm or better up to 8 km. Maps bigger than 8 km would need positions stored relative to chunks.
 
 ### 2.2 Who is in it
 
@@ -45,6 +47,7 @@ Everything below is written in service of both goals.
 | Journalists and phone cameras | 10–200 | Autonomous. They record events (§2.7). |
 | Bystanders | 0–5k | Autonomous. They can join, flee or film. |
 | Police officers | 50–2k | Squad AI driven by the state's director (§14). |
+| Vehicles (police vans, water cannon trucks, ambulances) | 0–100 | Driven along the road graph by the state's director, or by ambulance logic. |
 
 Archetypes differ in their defaults: baseline anger, fear threshold, trust in organizers, stamina, willingness to use violence, and speed.
 
@@ -95,20 +98,32 @@ The player's real constraint is **reach**. Organizers are few and can be arreste
 - Cameras record the events they can see, each with a severity score. The footage tally tracks **who was seen starting it**. Police charging a peaceful crowd is a large legitimacy win for the movement. Protesters burning a car is a loss.
 - Wildcards emerge from the simulation and are never scripted: a provocateur's thrown bottle, a martyr, a video that goes viral.
 
+### 2.8 Time and distance
+
+- **Riots take hours, and the city is big.** Crossing a 4 km map on foot takes about 50 minutes. The game has pause and 1×, 2×, 4× and 8× speed. Speed changes how many ticks run per real second, never the tick length, so results are the same at any speed.
+- **People arrive over time** through entry points, following a turnout curve from the setup: a trickle in the morning, a surge after work, radicals arriving after dark. Turnout is a curve over time, not a single number.
+- **Police reinforcements travel.** Vans drive from depots along the road graph. Where the police are stationed and how long they take to arrive both matter, and a barricade across a road delays them.
+- **Distance limits influence.** An organizer only rallies the people around them, and word of mouth crawls across a big map. Phones carry messages across the city until an internet shutdown makes distance matter again.
+
 ---
 
 ## 3. Performance targets
 
 Reference machine: a 4-core / 8-thread desktop CPU with AVX2 (any mainstream CPU from about 2015 onward).
 
-| Scenario | Agents | Target |
-|---|---|---|
-| Small protest | 2,000 | ≤ 0.7 ms / tick |
-| **Standard riot** | **10,000** | **≤ 3.0 ms / tick** |
-| Mass demonstration (stretch, M7) | 50,000 | ≤ 15 ms / tick |
-| Auto-resolve, headless | 10,000 for 12,000 ticks (10 min) | ≤ 40 s total |
+| Scenario | Agents | Target | Fastest game speed it allows |
+|---|---|---|---|
+| Small protest | 2,000 | ≤ 0.7 ms / tick | 8× with room to spare |
+| **Standard riot** | **10,000** | **≤ 3.0 ms / tick** | **8×** (160 ticks/s needs ≤ 6.25 ms) |
+| Mass demonstration (stretch, M7) | 50,000 | ≤ 15 ms / tick | about 3× |
+| Auto-resolve, 10-minute riot | 10,000 for 12,000 ticks | ≤ 40 s total | — |
+| Auto-resolve, 1 simulated hour | 10,000 for 72,000 ticks | ≤ 2 min total, which needs sleeping (§7.6) | — |
+
+All targets hold on any map up to 4 × 4 km.
 
 Hard rules:
+
+- **Map size is free.** The same crowd costs the same per tick, within 5%, on a 0.5 km map and on a 4 km map (§19).
 
 - **Zero heap allocations per tick** once the simulation reaches steady state (§16).
 - **Hot and warm state stays at or under 40 bytes per agent** (§6.2).
@@ -172,7 +187,7 @@ riotter/
 
 1. **The simulation knows nothing about rendering.** `riot_sim` has no window, no clock and no I/O.
 2. **Single writer.** Every phase declares what it reads and what it writes. Inside a phase, a parallel task writes only to its own chunk of agents or its own range of cells. Anything that affects *another* agent goes through a field (§8) or an event (§11.3). This one rule gives us parallelism without locks, and it also gives us determinism.
-3. **Time is a tick counter.** `tick: u32`, and `dt = 1/20 s` is a constant. Wall-clock time never enters the simulation.
+3. **Time is a tick counter.** `tick: u32`, and `dt = 1/20 s` is a constant. Wall-clock time never enters the simulation. Game speed (§2.8) only changes how many ticks run per real second. A `u32` tick count lasts 6.8 years of game time.
 4. **All input is a command stamped with a tick.** Player actions, tunable changes and debug actions are all commands. A replay is therefore just seed + setup + command log, and it reproduces everything.
 
 ### 4.3 The tick
@@ -218,8 +233,10 @@ Adjacent element-wise phases may be **fused** into a single pass per chunk (for 
 | Civilians | 1k–50k | SoA, lane storage | Hot loops over every agent |
 | Officers | 50–2k | SoA, same body layout | Same physics, different mind |
 | Squads, messages, goals, supply drops, gas emitters, projectiles | ≤ a few hundred | `Vec<Struct>` (AoS) | Small, touched as whole records |
-| Props (cars, bins, barricades) | ≤ a few hundred | `Vec<Struct>` (AoS) | Collide like walls, but can be pushed, built, burned or destroyed |
-| Wall segments | thousands | SoA segment arrays + a static 4 m grid of segment lists | Built once from the map polygons, never written during a riot |
+| Props (parked cars, bins, barricades) | ≤ a few thousand | `Vec<Struct>` (AoS) | Collide like walls, but can be pushed, built, burned or destroyed |
+| Vehicles | ≤ 100 | `Vec<Struct>` (AoS) | Oriented boxes driven along the road graph; people collide with them like props |
+| Wall segments | up to a few hundred thousand | SoA segment arrays + a static 4 m grid of segment lists (CSR) | Built once from the map polygons, never written during a riot |
+| Field chunks | active ones only | Fixed-size chunks from a pool, plus a chunk table | Fields exist only where something is happening (§8) |
 | Rare states (being carried, being arrested, carrying an item) | few | Sparse sets keyed by `stable_id` | Hot loops never check a flag that is almost always false |
 
 Data-oriented does not mean SoA everywhere. Small tables are fine as plain structs. Rare states follow the idea of *existence-based processing* (R. Fabian, *Data-Oriented Design*): an agent belongs to a table *because* it has the state, so loops visit only the agents that actually have it.
@@ -266,7 +283,7 @@ Protesters, organizers, provocateurs, journalists and bystanders all share the c
 
 **Per-archetype tables**, not per-agent storage, hold body radius, mass, maximum speed and turn rate. Gear flags add to them; for example, a shield widens an officer.
 
-**Quantization.** Emotions and health are stored as `u8`, because 1/255 resolution is plenty for gameplay. Kernels widen them to f32, do the math, then narrow back with saturating rounding. Because the stored values are already `u8`, they can index 256-entry response-curve tables directly (§10). Positions stay f32: at 512 m, f32 resolution is about 6 × 10⁻⁵ m.
+**Quantization.** Emotions and health are stored as `u8`, because 1/255 resolution is plenty for gameplay. Kernels widen them to f32, do the math, then narrow back with saturating rounding. Because the stored values are already `u8`, they can index 256-entry response-curve tables directly (§10). Positions stay f32: at 4 km, f32 resolution is about 0.5 mm (§2.1).
 
 ### 6.3 Lane storage
 
@@ -326,20 +343,20 @@ Checked on Rust 1.97 with `-C target-cpu=x86-64-v3`: this loop compiles to `ymm`
 
 Every person is a circle with a continuous `f32` position, a radius (about 0.23 m for most adults, about 0.32 m for an armoured officer with a shield) and a mass. Nothing snaps to a grid. Grids exist only to answer two kinds of question quickly: "who is near me?" and "what is the gas, fear or route here?". Each grid is sized for its own question:
 
-| Structure | Cell | Size (512 m map) | Answers |
-|---|---|---|---|
-| Body hash | 0.65 m: one body diameter plus a margin | 2N buckets, whatever the map size | Who is touching me, or about to? |
-| Nav grid | 0.5 m, built as 16 × 16 tiles | 1024 × 1024 cells, only the needed tiles exist | Which way to my goal? (§9) |
-| Field grid | 2 m | 256 × 256 | Crowd-scale effects: fear, gas, threat, messages (§8) |
-| Wall grid | 4 m, static | 128 × 128 lists of segments | Which wall segments should I test? |
+| Structure | Cell | Size on a 4 km map | Memory and cost follow | Answers |
+|---|---|---|---|---|
+| Body hash | 0.65 m: one body diameter plus a margin | 2N buckets | number of people | Who is touching me, or about to? |
+| Nav grid | 0.5 m, in 16 × 16-cell tiles | 8192², stored per tile | tiles that contain walls | Which way to my goal? (§9) |
+| Field grid | 2 m, in 64 × 64-cell chunks | 2048², only active chunks exist | area where something is happening | Crowd-scale effects: fear, gas, threat, messages (§8) |
+| Wall grid | 4 m, static | 1024² segment lists (CSR) | number of wall segments | Which wall segments should I test? |
 
-Walls themselves are exact polygons (§2.1). The wall grid only lists which of their segments are worth testing.
+Walls themselves are exact polygons (§2.1). The wall grid only lists which of their segments are worth testing. Nothing on this list is updated per tick across the whole map. That is what keeps map size free (pillar 7).
 
 Grid dimensions are powers of two (smaller maps are padded with walls), so cell lookups are shifts and masks, and Morton codes cover the field grid exactly.
 
 ### 7.2 Stable bucket sort
 
-The body hash and the field index are both built with the same allocation-free stable counting sort, which costs O(agents + buckets):
+The body hash is built with an allocation-free stable counting sort, which costs O(agents + buckets):
 
 ```rust
 pub struct Buckets {
@@ -374,7 +391,7 @@ pub fn body_bucket(cx: i32, cy: i32, mask: u32) -> u32 {
 
 The cost depends on the number of people, not on the map size or the cell size, which is what lets cells be as small as one body. Two different cells that land in the same bucket only add a few extra candidates, and the distance test throws those out.
 
-**Field index.** Each agent's field cell is `morton(x / 2 m, y / 2 m)`, sorted with the same `Buckets`. Field scatters then become segmented reductions (§8).
+**Field index.** Each agent's key is the Morton code of its 2 m field cell (22 bits on a 4 km map). A big map has 4 million field cells, and a counting sort over every cell would cost more than the agents do. So the field index uses a two-pass LSD radix sort with 11 bits per pass on these keys. That is O(N) whatever the map size, still stable and allocation-free. One scan over the sorted keys then finds where each cell's run of agents starts and ends, and field scatters become segmented reductions over those runs (§8).
 
 ### 7.3 Neighbour lists
 
@@ -403,6 +420,22 @@ Body prototype: scalar code, no SIMD, neighbour lists rebuilt every tick, two co
 
 The cost barely changes with density. v0.1's 2 m cells would have meant scanning about 180 candidates per person at 5/m². That is why v0.1 fell back to a density approximation inside crowds and let people overlap, and v0.2 removes both.
 
+### 7.6 Sleeping
+
+On a big map, much of the crowd is standing still at any moment: listening to speeches, waiting at a police line, resting in a park. Physics engines save time by letting resting bodies sleep, and people get the same treatment. The decision is based only on simulation state, never on the camera, so it stays deterministic and auto-resolve gets the same benefit.
+
+- **Falling asleep.** An agent sleeps after about 2 s (40 ticks) of being nearly still (under 0.05 m/s), calm, under low pressure, and with nothing new in its field of view.
+- **What a sleeper skips:** steering, its own contact solve, pose updates and scheduled thinking. A sleeper still sits in the body hash as an obstacle, still feeds the fields (it counts towards density and fear), and still absorbs emotions, because those are cheap element-wise passes.
+- **Waking up.** Any of these wakes an agent:
+  - an awake body pushes into it (the awake agent emits a `Wake` event, resolved in order like every event);
+  - a message reaches it;
+  - a field in its chunk jumps past a threshold (gas, threat or fear);
+  - an interaction targets it;
+  - a slow timer wakes it to rethink every 4 seconds or so.
+- **Only awake agents are processed.** The heavy phases (steer, move, think) iterate an `awake` index list rebuilt each tick, so sleepers cost nothing there.
+
+How much this saves depends on the scenario: a crowd listening in a square is mostly asleep, a march is mostly awake. The 1-simulated-hour auto-resolve target depends on it, and it is measured in M7.
+
 ---
 
 ## 8. Fields
@@ -419,10 +452,16 @@ Fields carry the things a whole crowd shares: fear spreading through a square, a
 | camera | u8 | journalists, phones | think, footage |
 | message | u16 (fidelity << 8 \| id) | carriers | messages (§13) |
 
-Layers are stored row-major on the 256 × 256 field grid, one `Vec` per layer. Each f32 layer is 256 KB.
+**Storage is sparse.** Layers live in chunks of 64 × 64 cells (128 m × 128 m), which is 16 KB per f32 layer per chunk.
+- A chunk exists only while it is **active**: it holds people or an emitter (gas, fire), or its values haven't yet decayed to zero.
+- Chunks come from a pool allocated at riot start, so activating one allocates nothing. A small chunk table (32 × 32 entries for a 4 km map) maps chunk coordinates to pool slots.
+- Diffusion reads a 1-cell halo from neighbouring chunks and activates a neighbour when something spreads into it.
+- A chunk that has been empty and decayed for a while goes back to the pool.
+
+Cost and memory therefore follow the area where something is happening, not the size of the map.
 
 - **Sampling is bilinear.** Agents read a blend of the four nearest cells, so values change smoothly as someone walks and never jump in 2 m steps. The renderer draws gas and heatmaps from the same layers with GPU filtering (§18).
-- **Scatter is a segmented reduction.** The field index (§7.2) sorts agents by field cell, so each cell's agents form one contiguous range, and a cell's value is a reduction over that range. The work is parallel over cells, and each cell is written by exactly one task: no atomics, no thread-local grids, and the result is deterministic. Each layer is written in a single streaming pass over all cells (empty cells write their neutral value), so layers never need a separate clear.
+- **Scatter is a segmented reduction.** The field index (§7.2) sorts agents by field cell, so each cell's agents form one contiguous range, and a cell's value is a reduction over that range. The work is parallel over cells, and each cell is written by exactly one task: no atomics, no thread-local grids, and the result is deterministic. Each layer is written in a single streaming pass over the cells of every active chunk (empty cells write their neutral value), so layers never need a separate clear.
 - **Diffuse/decay** uses a separable 3-tap blur (one horizontal pass, one vertical pass), parallel over rows, and it vectorizes cleanly. Gas uses semi-Lagrangian advection by the wind, plus diffusion and decay, which stays stable at any `dt`.
 - **Absorb (contagion):** each agent does `emotion += rate · (field[cell] − emotion)`. That is an element-wise kernel in which each agent writes only to itself.
 - **Multi-rate updates:** fear, anger, density and gas update every tick. Threat updates every 4 ticks and camera every 10 ticks. Each layer is tuned by benchmark.
@@ -436,9 +475,11 @@ Flow fields give people their general direction. They never decide exactly where
 
 - **There is one flow field per active goal:** an objective, an exit, a rally point or a police target. At most 32 can be active at once.
 - **The nav grid is 0.5 m**, rasterized from the wall polygons with clearance. A nav cell is open only if the smallest body fits at its centre. Gaps narrower than a person close, and a 0.9 m doorway stays open.
+- **The nav grid is stored per tile.** A tile is marked fully open, fully blocked or mixed, and only mixed tiles keep a 256-bit walkability bitmap (32 bytes). A 4 km map has 262,144 tiles, and in a city most of them are fully open or fully blocked. Rasterization runs in parallel per tile at load time.
 - **Fields are built as tiles from the start**, following E. Emerson, "Crowd Pathfinding and Steering Using Flow Field Tiles" (*Game AI Pro*).
   - A tile is 16 × 16 nav cells (8 m × 8 m), and tiles connect through a portal graph.
-  - For each goal, a coarse route is found over the portal graph, then flow tiles are built only for tiles on and near that route, when people actually enter them.
+  - **Routes are found on two levels**, as in HPA* (Botea, Müller and Schaeffer, "Near Optimal Hierarchical Path-Finding", 2004). First across 128 m regions (16 × 16 tiles, 1,024 regions on a 4 km map), then across tiles inside the chosen corridor. A 3 km route never searches the whole map.
+  - Flow tiles are then built only for tiles on and near that route, when people actually enter them.
   - Each tile is a **direction field** of 256 bytes, one byte per cell holding one of 256 quantized angles (0 means "no direction"). Memory grows with the tiles in use, not with the map. Built tiles are cached per goal with an LRU limit.
 - **The integration field uses Dial's algorithm** (a bucket-queue Dijkstra over integer costs 1–255). Cell cost = base + density penalty + gas penalty, so crowds route around crushes and gas clouds.
 - **Sampling is bilinear.** Steering blends the four nearest cells, decoding angles through a 256-entry `(cos, sin)` lookup table, so there is no runtime trigonometry and movement doesn't look grid-aligned.
@@ -486,7 +527,7 @@ Finally, `vel = lerp(vel, desired + avoidance, response)`, clamped to the agent'
    - It writes only its own corrected position, into a second buffer.
    - Jacobi, unlike Gauss-Seidel, keeps the single-writer rule, and its results don't depend on order or thread count.
    - In the prototype, no pair stayed more than 20% overlapped at 3/m². At 5/m², 4–20 of 50,000 people did with two iterations.
-3. **Walls and props.** Circle-versus-segment push-out against the segments listed in the wall grid, plus props (cars, bins, barricades) from their small table.
+3. **Walls, props and vehicles.** Circle-versus-segment push-out against the segments listed in the wall grid, plus props (parked cars, bins, barricades) and vehicles (oriented boxes) from their small tables. Vehicles are kinematic: they push people but are not pushed back, unless a crowd rocks or overturns one, which is an interaction event.
 4. **Velocity from movement.** `vel = (pos_new − pos) / dt`, so pushes carry momentum and shoves travel through a packed crowd as waves.
 5. **Pressure.** The total push-out each person received is stored in `pressure`. Sustained high pressure causes crush injuries, falls and panic. Fallen people become low obstacles that make falls around them more likely, which is the cascade behind real crowd crushes.
 6. **Pose.** `gait` follows from the action and the speed, and `stride` advances by distance travelled divided by stride length.
@@ -594,7 +635,8 @@ Organizers rebroadcast at full fidelity around themselves, so **where your organ
 ## 14. Police
 
 - **Squads** are a small AoS table (at most 200 rows). Each row holds the doctrine state, formation, target, officers (as stable ids), morale and stamina.
-- **The director** runs every 20 ticks. It reads the threat and density fields and clusters the crowd by running union-find over dense field cells. It then picks responses within the escalation cap and assigns squads to them.
+- **The director** runs every 20 ticks. It reads the threat and density fields and clusters the crowd by running union-find over dense cells in the active field chunks. It then picks responses within the escalation cap and assigns squads to them.
+- **Deployment across the city.** Squads start at depots and staging points, and reinforcements travel by van along the road graph. The director has to decide where to commit forces before it knows where the crowd will go, and travel time is part of that decision.
 - **Officers are heavier and wider** than protesters. A **shield** is an oriented segment in front of its officer: it blocks projectiles from the front and pushes in contacts. A shield wall advancing into a crowd needs no special code, because it is just bodies with mass, so pushing matches between a line and a crowd emerge on their own.
 - **Formations:**
   - A line is a set of slots along a segment.
@@ -687,10 +729,11 @@ Once `std::simd` is stable, migrate the `wide` code to it.
 pub struct RiotSetup {
     pub seed: u64,
     pub map: MapId,
-    pub crowd: [u32; ARCHETYPES],   // turnout per archetype
+    pub crowd: [u32; ARCHETYPES],   // total turnout per archetype
+    pub arrivals: Vec<Arrival>,     // turnout curve per entry point over time
     pub organizers: u16,
     pub supplies: Supplies,         // what the movement's logistics delivered
-    pub police: PoliceForce,        // squads, doctrine
+    pub police: PoliceForce,        // squads, doctrine, depots, vans
     pub escalation_cap: Escalation,
     pub comms: Comms,               // phones / degraded / shutdown
     pub weather: Weather,           // wind for gas, heat for thirst
@@ -739,10 +782,10 @@ The snapshot is **written in `stable_id` order**: it gathers through `slot_of`, 
 - **Layered "paper doll" sprites.** Body, clothes, hair and held item are separate sheets. Each sheet has frames for every gait in 8 directions (16 if the camera needs it). Colours come from palette swaps in the shader, indexed by `appearance`, so a handful of sheets yields thousands of distinct-looking people. Each layer is one instanced draw call.
 - **Depth without sorting.** The camera is a 3/4 top-down view, and a sprite's depth comes from its y position through the depth buffer, so there is no CPU sort.
 - **Level of detail.**
-  - Far zoom: each person is a small quad coloured by state, or the crowd becomes a density texture.
+  - Far zoom, up to the whole 4 km city: each person is a small quad coloured by state, or the crowd becomes a density texture per field chunk.
   - Middle zoom: single-layer sprites.
   - Close zoom: full layered sprites.
-  - People outside the camera are culled using the field grid.
+- **Culling.** Each tick, the renderer collects the people in field chunks that overlap the camera, plus a margin, and uploads only those instances. On a big map most people are off-screen at close zoom.
 - **Animation timing.** Frames come from `stride`, which is simulation data. Purely cosmetic motion (breathing, flags waving, hair) runs on the render clock and never feeds back.
 - **Effects.** Gas is drawn from the gas layer as a smooth texture (GPU bilinear filtering) plus particles. Fire and water cannon are particles.
 - **Debug overlays** draw field layers (density, fear, gas, messages) and contact pressure as heatmaps. These are the main tool for tuning emergent behaviour.
@@ -765,6 +808,7 @@ The snapshot is **written in `stable_id` order**: it gathers through `slot_of`, 
   - "A kettle closes around a 500-person cluster within 60 s."
   - "After a 5/m² crowd settles, fewer than 0.1% of touching pairs overlap by more than 20%."
   - "A bottle thrown at a shield line never passes through an officer."
+- **Map-size independence:** the same 10k crowd scenario runs on a 0.5 km map and on a 4 km map, and the per-tick cost must match within 5%.
 
 **Benchmarks**
 - **Per phase:** criterion benches at 2k, 10k and 50k agents on fixed scenarios.
@@ -790,13 +834,13 @@ Each milestone ends with a performance gate. All numbers are on the §3 referenc
 | | Content | Exit gate |
 |---|---|---|
 | **M0** Skeleton | workspace and profiles, `World`, fixed tick, RNG, lane storage, headless runner, determinism and allocation tests, bench harness | tests green in CI; benches report per phase |
-| **M1** Bodies move | Tiled map → polygons, wall grid, nav tiles, body hash, neighbour lists, steering, facing, contacts, pose, debug renderer + overlays | 10k agents ≤ 2.0 ms/tick |
-| **M2** Minds | fields, emotions, contagion, field of view, utility AI, staggered think | 10k ≤ 2.5 ms |
+| **M1** Bodies move | Tiled map → polygons, wall grid, nav tiles with two-level routing, body hash, neighbour lists, steering, facing, contacts, pose, arrivals, game speed, debug renderer + overlays | 10k agents ≤ 2.0 ms/tick on a 4 km map |
+| **M2** Minds | sparse field chunks, emotions, contagion, field of view, utility AI, staggered think | 10k ≤ 2.5 ms; map-size test passes |
 | **M3** Influence | organizers, messages, objectives, stance, supply drops, chants | 10k ≤ 2.6 ms |
-| **M4** Police | squads, director, lines, kettles, arrests, shields, mass | 10k + 300 officers ≤ 2.8 ms |
-| **M5** Hazards & violence | gas, fire, water cannon, projectiles, injuries, crush from pressure, falls, medics | 10k ≤ 3.0 ms |
+| **M4** Police | squads, director, depots, vans on the road graph, lines, kettles, arrests, shields, mass | 10k + 300 officers ≤ 2.8 ms |
+| **M5** Hazards & violence | gas, fire, water cannon trucks, projectiles, injuries, crush from pressure, falls, medics | 10k ≤ 3.0 ms |
 | **M6** Outcome | events log, footage, `RiotOutcome`, auto-resolve | 10-minute 10k riot ≤ 40 s headless |
-| **M7** Scale | skip-when-still neighbour lists, SIMD contacts, parallel radix sort, PGO | 50k ≤ 15 ms |
+| **M7** Scale | sleeping, skip-when-still neighbour lists, SIMD contacts, parallel radix sort, PGO | 50k ≤ 15 ms; 1 simulated hour at 10k ≤ 2 min |
 | **M8** Sprites | 16-byte snapshot, instanced layered sprites, palette swaps, level of detail, effects | 50k visible people at 60 fps on a mid-range GPU; 10k on integrated graphics |
 
 ---
@@ -809,4 +853,6 @@ Each milestone ends with a performance gate. All numbers are on the §3 referenc
 - **Camera angle:** straight top-down, 3/4 top-down or isometric? This decides the sprite sheets (8 or 16 directions) and how depth works. It needs an answer before M8 art starts.
 - **Field cell size:** 2 m or 1 m for gas and fear? Finer looks better up close but costs 4× per layer.
 - **Officer index:** should officers share the civilian body hash (tagged entries) or keep their own? Decide by benchmark in M4.
-- **Map authoring beyond Tiled:** for example, importing OpenStreetMap street layouts to build fictional districts.
+- **Map size ceiling:** 4 km is the target. `f32` positions stay at 1 mm or better up to 8 km. A whole-city map beyond that would need positions stored relative to chunks.
+- **Game speed:** is 8× enough? Should the game offer to speed up automatically when nothing is happening near the player's people?
+- **Map authoring beyond Tiled:** for example, importing OpenStreetMap street layouts to build fictional city centres. That becomes more attractive now that a map is 4 km across.
