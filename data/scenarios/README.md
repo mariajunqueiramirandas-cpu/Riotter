@@ -9,7 +9,7 @@ the `MapDef` and `Tunables` it runs with.
 | File                      | Map       | People | Police     | Cap              | Length |
 |---------------------------|-----------|--------|------------|------------------|--------|
 | `small_protest.ron`       | district  | 2,000  | 4 squads   | BatonsAndArrests | 45 min |
-| `standard_riot.ron`       | district  | 10,000 | 30 squads  | GasAndWater      | 10 min (the benchmark) |
+| `standard_riot.ron`       | district  | 10,000 | 30 squads  | GasAndWater      | 20 min (the benchmark) |
 | `mass_demonstration.ron`  | 8 km city | 50,000 | 60 squads  | GasAndWater      | 2 h    |
 | `city_day.ron`            | 8 km city | 30,000 | 42 squads  | MassArrests      | 14 h, internet shutdown at 21:00 |
 

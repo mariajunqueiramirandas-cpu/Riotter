@@ -51,11 +51,18 @@ pub fn measure(
         let mut out = Vec::with_capacity(ticks as usize);
         let mut timer = Timer::default();
         for _ in 0..ticks {
-            w.tick_profiled(&[], &mut timer);
+            measured_tick(w, &mut timer);
             out.push(timer.current);
         }
         out
     })
+}
+
+/// One measured tick. Not inlined, so a profiler can collect only these:
+/// `valgrind --tool=callgrind --collect-atstart=no --toggle-collect='*measured_tick*'`.
+#[inline(never)]
+fn measured_tick(w: &mut World, timer: &mut Timer) {
+    w.tick_profiled(&[], timer);
 }
 
 pub fn bench(args: &Args) -> Result<(), String> {

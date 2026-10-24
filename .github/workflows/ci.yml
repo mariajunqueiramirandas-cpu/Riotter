@@ -15,7 +15,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned, so a new Rust release's lints cannot turn CI red on unchanged
+      # code; bump deliberately.
+      - uses: dtolnay/rust-toolchain@1.97
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2

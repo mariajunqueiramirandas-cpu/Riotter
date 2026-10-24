@@ -39,13 +39,10 @@ impl StateHasher {
     }
 
     pub fn write_bytes(&mut self, bytes: &[u8]) {
-        let mut words = bytes.chunks_exact(8);
-        for w in &mut words {
-            self.write_u64(u64::from_le_bytes([
-                w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7],
-            ]));
+        let (words, rest) = bytes.as_chunks::<8>();
+        for &w in words {
+            self.write_u64(u64::from_le_bytes(w));
         }
-        let rest = words.remainder();
         if !rest.is_empty() {
             let mut buf = [0u8; 8];
             buf[..rest.len()].copy_from_slice(rest);
