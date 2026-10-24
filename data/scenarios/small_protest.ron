@@ -1,0 +1,46 @@
+// A small, peaceful protest in the 1 km district: 2,000 people walk in from
+// the edges and the metro, rally at the central square and petition the
+// government. A handful of police squads watch; batons and arrests at most.
+(
+    title: "Small protest",
+    description: "2,000 people rally at the central square; a few police squads keep watch.",
+    map: "../maps/district.json",
+    tunables: "../tunables.ron",
+    seed: 1,
+    start: "14:00",
+    duration: 45,
+
+    crowd: {
+        "student": 700,
+        "worker": 700,
+        "elder": 300,
+        "radical": 80,
+        "journalist": 40,
+        "bystander": 180,
+    },
+    organizers: 6,
+    arrivals: [
+        (entry: "edge_*", from: 0, to: 10),
+        (entry: "metro_*", from: 0, to: 15, share: 0.6),
+    ],
+    supplies: (water: 120, medic: 30, shields: 10, barricade: 0),
+
+    police: (
+        vans_per_depot: 2,
+        water_cannons: 0,
+        aggression: 0.3,
+        squads: [
+            (kind: Line, depot: "depot_north", staging: "staging_central_square", count: 2),
+            (kind: Line, depot: "depot_south", available: 10),
+            (kind: Snatch, officers: 6, depot: "depot_north", available: 15),
+        ],
+    ),
+    escalation_cap: BatonsAndArrests,
+    comms: (mode: Phones),
+    weather: (wind: (1.5, 0.5), heat: 0.4, dusk: "20:15"),
+
+    objectives: [
+        (name: "Rally at the square", kind: MarchTo, area: "central_square", announced: true),
+        (name: "Petition the government", kind: Hold, area: "government_quarter", weight: 0.5),
+    ],
+)

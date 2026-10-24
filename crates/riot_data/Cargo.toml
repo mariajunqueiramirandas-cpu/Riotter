@@ -1,0 +1,23 @@
+[package]
+name = "riot_data"
+description = "RON scenarios, tunables and Tiled maps → riot_sim types."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+riot_sim.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ron.workspace = true
+# Tiled's zlib/gzip tile layers; the 8 km city's ground layer is 4 M tiles.
+# Already in Cargo.lock (macroquad → png), pure Rust, only depends on adler2.
+miniz_oxide = "0.8"
+
+[dev-dependencies]
+# Tests walk riot_sim's nav map, whose API takes riot_core::Vec2.
+riot_core.workspace = true
+
+[lints]
+workspace = true
