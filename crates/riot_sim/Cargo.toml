@@ -1,0 +1,16 @@
+[package]
+name = "riot_sim"
+description = "Headless, deterministic, fixed-tick riot simulation."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+riot_core.workspace = true
+rayon.workspace = true
+bytemuck.workspace = true
+libm.workspace = true
+
+[lints]
+workspace = true

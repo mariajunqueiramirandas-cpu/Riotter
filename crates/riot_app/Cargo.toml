@@ -1,0 +1,18 @@
+[package]
+name = "riot_app"
+description = "Window and input: input → commands, game speed, hot reload."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+riot_core.workspace = true
+riot_sim.workspace = true
+riot_data.workspace = true
+riot_render.workspace = true
+macroquad.workspace = true
+rayon.workspace = true
+
+[lints]
+workspace = true

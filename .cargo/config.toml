@@ -1,0 +1,15 @@
+# Release and dist builds target x86-64-v3 (AVX2, FMA, BMI2), DESIGN §15.
+# Cargo cannot scope rustflags to a profile on stable, so this applies to every
+# x86-64 Linux build. The baseline build overrides it:
+#   RUSTFLAGS="-C target-cpu=x86-64" cargo build --release
+# and CI checks that both produce identical state hashes (DESIGN §12, §19).
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=x86-64-v3"]
+
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld.exe"
+rustflags = ["-C", "target-cpu=x86-64-v3"]
+
+[alias]
+headless = "run --release -p riot_headless --"
+app = "run --release -p riot_app --"
