@@ -93,7 +93,7 @@ fn write(w: &World, args: &Args, path: &str, layer: Option<&str>) -> Result<(), 
         let y = (p.y - cy) * px_per_m + size as f32 * 0.5;
         (x, y)
     };
-    let mut disc = |img: &mut [[u8; 3]], p: Vec2, r: f32, col: [u8; 3]| {
+    let disc = |img: &mut [[u8; 3]], p: Vec2, r: f32, col: [u8; 3]| {
         let (x, y) = to_px(p);
         let rp = (r * px_per_m).max(0.6);
         for dy in -(rp.ceil() as i32)..=rp.ceil() as i32 {

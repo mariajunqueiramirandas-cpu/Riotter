@@ -16,7 +16,7 @@ Scenario:
   --squads S         police squads of 10 (default 8)
   --seed X           seed (default 1)
   --size M           district size in metres, up to 8192 (default 1024)
-  --scenario PATH    scenario file (not supported yet; see scenario.rs)
+  --scenario PATH    RON scenario file (data/scenarios/*.ron)
   --tunables PATH    RON map of tunables { \"name\": value, ... }, hot-reloaded
 
 Run:

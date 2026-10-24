@@ -127,7 +127,14 @@ fn median(v: &mut [f32]) -> f32 {
 #[macroquad::main(window_conf)]
 async fn main() {
     let args = parse_args();
-    let (map, setup, tun) = scenario::load_world(&args);
+    let loaded = match scenario::load_world(&args) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("cannot load the riot: {e}");
+            std::process::exit(1);
+        }
+    };
+    let (map, setup, tun) = (loaded.map, loaded.setup, loaded.tunables);
     let mut world = match World::new(&setup, &map, tun) {
         Ok(w) => w,
         Err(e) => {
@@ -179,7 +186,7 @@ async fn main() {
     };
     let mut input = Input::new(args.speed, paused, args.overlay);
     let mut snaps = Snapshots::default();
-    let mut watcher = args.tunables.clone().map(|p| TunablesWatcher::new(p, tun));
+    let mut watcher = loaded.watch.map(|p| TunablesWatcher::new(p, tun));
     let mut times = FrameTimes::default();
     let (mut cpu_samples, mut frame_samples) = (Vec::new(), Vec::new());
     let mut shot_frames = 0u32;

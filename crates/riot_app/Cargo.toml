@@ -9,9 +9,9 @@ license.workspace = true
 [dependencies]
 riot_sim.workspace = true
 riot_render.workspace = true
+riot_data.workspace = true
 macroquad.workspace = true
 rayon.workspace = true
-# riot_data comes back with `--scenario` support (see src/scenario.rs).
 
 [lints]
 workspace = true
