@@ -215,8 +215,9 @@ mod tests {
     fn layout_is_40_bytes() {
         let per = 4 * 4 + 4 + 4 + 4 + 2 + 2 + 4 + 4;
         assert_eq!(per, STATE_BYTES_PER_AGENT);
-        assert!(STATE_BYTES_PER_AGENT <= 40);
     }
+
+    const _: () = assert!(STATE_BYTES_PER_AGENT <= 40);
 
     #[test]
     fn push_and_permute() {

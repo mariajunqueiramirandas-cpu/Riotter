@@ -494,7 +494,7 @@ impl World {
             };
             w.retarget_objective(k as u8);
             if o.announced {
-                w.msgs.announce(k as u8, o.stance, 0);
+                w.msgs.announce(k as u8, o.stance, o.weight.max(0.0), 0);
             }
         }
         w.retarget_exits();
@@ -843,7 +843,7 @@ impl World {
 
     fn rebuild_spatial(&mut self) {
         let every = self.tun.reorder_interval.max(1.0) as u32;
-        if self.tick % every == 0 {
+        if self.tick.is_multiple_of(every) {
             self.compact();
         }
         self.spatial.rebuild(&self.people, &self.arch);
@@ -873,7 +873,7 @@ impl World {
         crate::hazards::pin_emitters(self);
         // Multi-rate layers (DESIGN §8): emotions and threat every 4 ticks,
         // on alternate ticks so their costs do not stack.
-        let threat_tick = tick % 4 == 0;
+        let threat_tick = tick.is_multiple_of(4);
         let emo_tick = tick % 4 == 2;
         self.fields.scatter(
             &self.spatial,
@@ -883,7 +883,7 @@ impl World {
             emo_tick,
         );
         crate::messages::stamp_chants(self);
-        if tick % 10 == 0 {
+        if tick.is_multiple_of(10) {
             crate::hazards::stamp_cameras(self);
         }
         if emo_tick {
@@ -899,9 +899,14 @@ impl World {
             arch: &self.arch,
             tun: &self.tun,
             heat: self.setup.weather.heat,
+            seed: self.seed,
+            tick,
         };
-        crate::fields::absorb(&self.fields, &mut self.people, &self.spatial, &ap);
-        if tick % 20 == 0 {
+        let (hurt, hurt_officers) =
+            crate::fields::absorb(&self.fields, &mut self.people, &self.spatial, &ap);
+        self.outcome.injuries += hurt;
+        self.outcome.officers_injured += hurt_officers;
+        if tick.is_multiple_of(20) {
             self.fields.housekeeping(1e-3);
         }
     }
@@ -1003,10 +1008,10 @@ impl World {
             h.write_f32(pr.pos.y);
             h.write_u32(pr.health as u32 | (pr.flags as u32) << 8 | (pr.build as u32) << 16);
         }
-        self.police.hash(&mut h);
-        self.hazards.hash(&mut h);
-        self.msgs.hash(&mut h);
-        self.outcome.hash(&mut h);
+        self.police.hash_into(&mut h);
+        self.hazards.hash_into(&mut h);
+        self.msgs.hash_into(&mut h);
+        self.outcome.hash_into(&mut h);
         h.finish()
     }
 

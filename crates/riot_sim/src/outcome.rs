@@ -132,7 +132,7 @@ impl OutcomeAccum {
         }
     }
 
-    pub fn hash(&self, h: &mut StateHasher) {
+    pub fn hash_into(&self, h: &mut StateHasher) {
         for x in [
             self.arrests,
             self.injuries,
@@ -155,7 +155,7 @@ pub fn account(w: &mut World) {
     let officers = w.police.on_map.len() as u32;
     let crowd = w.spatial.live.saturating_sub(officers);
     w.outcome.peak_crowd = w.outcome.peak_crowd.max(crowd);
-    if w.tick % 20 != 0 {
+    if !w.tick.is_multiple_of(20) {
         return;
     }
     for k in 0..MAX_OBJECTIVES {

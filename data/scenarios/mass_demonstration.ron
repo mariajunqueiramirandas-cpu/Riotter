@@ -54,7 +54,7 @@
 
     objectives: [
         (name: "Fill the square", kind: MarchTo, area: "central_square", announced: true, stance: Peaceful),
-        (name: "Surround parliament", kind: Hold, area: "government_quarter", weight: 2.0, stance: Defensive),
+        (name: "Surround parliament", kind: Hold, area: "government_quarter", announced: true, weight: 2.0, stance: Defensive),
     ],
     // A crowd this size covers more ground than the defaults allow for.
     limits: (field_chunks: 320, flow_tiles: 49152),

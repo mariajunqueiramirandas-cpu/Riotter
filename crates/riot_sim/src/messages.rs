@@ -42,8 +42,10 @@ pub struct Messages {
     next_id: u8,
     /// Latest broadcast, delivered by phones.
     pub latest: u8,
-    /// The pre-announced plan that arriving protesters already know.
-    pub announced: u8,
+    /// Plans announced before the riot, with their objectives' weights:
+    /// arriving protesters know one of them.
+    pub announced: [(u8, f32); MAX_OBJECTIVES],
+    pub n_announced: u8,
     /// Organizers chanting, by stable id.
     pub chanting: Vec<u32>,
     pub count: u32,
@@ -63,7 +65,8 @@ impl Messages {
             table: [None; 256],
             next_id: 1,
             latest: 0,
-            announced: 0,
+            announced: [(0, 0.0); MAX_OBJECTIVES],
+            n_announced: 0,
             chanting: Vec::with_capacity(64),
             count: 0,
             chant_live: false,
@@ -90,15 +93,40 @@ impl Messages {
         id
     }
 
-    /// A plan announced before the riot.
-    pub fn announce(&mut self, objective: u8, stance: Stance, tick: u32) {
-        if self.announced == 0 {
-            self.announced = self.create(u32::MAX, objective, stance, tick);
+    /// A plan announced before the riot; `weight` is how much the crowd
+    /// wants it.
+    pub fn announce(&mut self, objective: u8, stance: Stance, weight: f32, tick: u32) {
+        let n = self.n_announced as usize;
+        if n < MAX_OBJECTIVES {
+            let id = self.create(u32::MAX, objective, stance, tick);
+            self.announced[n] = (id, weight);
+            self.n_announced += 1;
         }
     }
 
-    /// What an arriving person believes: the announced plan, heard at a
-    /// fidelity that depends on their trust.
+    /// The announced plan `stable` came for: drawn by objective weight times
+    /// how well its stance suits their archetype, so radicals lean to the
+    /// confrontational plan and workers to the peaceful one.
+    fn pick_announced(&self, own: Stance, r: u64) -> u8 {
+        let n = self.n_announced as usize;
+        let level = |s: Stance| s as u8 as f32 * 0.5;
+        let fit = |id: u8| match self.table[id as usize] {
+            Some(m) => 0.5 + 1.0 - (level(m.stance) - level(own)).abs(),
+            None => 0.0,
+        };
+        let total: f32 = self.announced[..n].iter().map(|&(id, w)| w * fit(id)).sum();
+        let mut x = unit(r) * total;
+        for &(id, w) in &self.announced[..n] {
+            x -= w * fit(id);
+            if x < 0.0 {
+                return id;
+            }
+        }
+        self.announced[..n].last().map_or(0, |a| a.0)
+    }
+
+    /// What an arriving person believes: the latest broadcast, else one of
+    /// the announced plans, heard at a fidelity that depends on their trust.
     pub fn arrival_belief(
         &self,
         stable: u32,
@@ -109,10 +137,12 @@ impl Messages {
         if a.is_officer() || a == Archetype::Journalist || a == Archetype::Bystander {
             return (intent::pack(intent::NO_GOAL, Stance::Peaceful), 0);
         }
-        let id = if self.latest != 0 {
+        let r = roll(seed, 0, stable, Stream::Message);
+        let broadcast = self.table[self.latest as usize].is_some_and(|m| m.organizer != u32::MAX);
+        let id = if broadcast || self.n_announced == 0 {
             self.latest
         } else {
-            self.announced
+            self.pick_announced(arch[a as usize].default_stance, r.rotate_left(29))
         };
         let Some(m) = self.table[id as usize] else {
             return (
@@ -120,14 +150,13 @@ impl Messages {
                 0,
             );
         };
-        let r = roll(seed, 0, stable, Stream::Message);
         let fid = (150.0 + 100.0 * arch[a as usize].trust * unit(r)).min(255.0) as u8;
         let fid = if a == Archetype::Organizer { 255 } else { fid };
         let it = garble(&m, fid, a, arch, r.rotate_left(13), None);
         (it, belief::pack(id, fid))
     }
 
-    pub fn hash(&self, h: &mut StateHasher) {
+    pub fn hash_into(&self, h: &mut StateHasher) {
         for m in self.table.iter().flatten() {
             h.write_u64(
                 m.id as u64
@@ -248,7 +277,8 @@ pub fn stamp_chants(w: &mut World) {
         let strength = 1.0 - fat * 0.7;
         w.fields.stamp(Layer::Chant, p, r, strength, &w.map);
         w.msgs.chant_live = true;
-        w.people.emo[i][emo::FATIGUE] = riot_core::narrow_u8(fat + w.tun.chant_cost);
+        let bits = riot_core::roll_key(w.seed, w.tick, s, 1, riot_core::Stream::Emotion);
+        w.people.emo[i][emo::FATIGUE] = riot_core::dither_u8(fat + w.tun.chant_cost, bits);
     }
 }
 
@@ -271,7 +301,7 @@ pub fn spread(w: &mut World) {
         CommsMode::Phones => 2,
         CommsMode::Degraded | CommsMode::Shutdown => 3,
     };
-    if tick % every != 0 {
+    if !tick.is_multiple_of(every) {
         return;
     }
     let hop = w.tun.hop_loss.clamp(0.0, 255.0) as u16;
@@ -534,7 +564,9 @@ fn adopt(p: &mut People, cx: &AdoptCtx) {
                 // Phones: group chats bring the latest broadcast.
                 if take.is_none() && fl & flag::PHONE != 0 && cx.phone_rate > 0.0 {
                     let latest = cx.msgs.latest;
-                    if latest != 0
+                    let broadcast =
+                        cx.msgs.table[latest as usize].is_some_and(|m| m.organizer != u32::MAX);
+                    if broadcast
                         && latest != belief::id(own)
                         && unit(r().rotate_left(29)) < cx.phone_rate
                     {
@@ -576,6 +608,8 @@ fn own_intent_of(b: u16, msgs: &Messages) -> u16 {
 #[inline]
 fn is_newer(msgs: &Messages, a: u8, b: u8) -> bool {
     match (msgs.table[a as usize], msgs.table[b as usize]) {
+        // Plans announced before the riot are alternatives, none newer.
+        (Some(x), Some(y)) if x.organizer == u32::MAX && y.organizer == u32::MAX => false,
         (Some(x), Some(y)) => x.tick > y.tick || (x.tick == y.tick && a > b),
         (Some(_), None) => true,
         _ => false,

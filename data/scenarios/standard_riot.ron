@@ -1,7 +1,9 @@
 // The benchmark scenario (DESIGN §3): 10,000 people and 30 police squads
-// (300 officers) in the 1 km district for 10 minutes. Everyone arrives in the
-// first four minutes; the crowd wants the square and the parliament, and the
-// state may go as far as gas and water cannon.
+// (300 officers) in the 1 km district. Everyone arrives in the first four
+// minutes and walks for five to eight; the crowd wants the square and the
+// parliament, and the state may go as far as gas and water cannon. The march
+// on parliament meets the lines after about ten minutes and it usually turns
+// into a riot a few minutes later, so the scenario runs for twenty.
 (
     title: "Standard riot",
     description: "10,000 people, 30 squads, gas and water allowed: the 3 ms/tick benchmark.",
@@ -9,7 +11,7 @@
     tunables: "../tunables.ron",
     seed: 42,
     start: "17:30",
-    duration: 10,
+    duration: 20,
 
     crowd: {
         "student": 3200,
@@ -44,6 +46,6 @@
 
     objectives: [
         (name: "Take the square", kind: Hold, area: "central_square", announced: true, stance: Defensive),
-        (name: "March on parliament", kind: MarchTo, area: "government_quarter", weight: 2.0, stance: Confrontational),
+        (name: "March on parliament", kind: MarchTo, area: "government_quarter", announced: true, weight: 2.0, stance: Confrontational),
     ],
 )

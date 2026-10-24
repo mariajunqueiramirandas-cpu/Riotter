@@ -75,28 +75,28 @@
     "gas_emit": 6.0,
     // Fear per tick per unit of gas.
     "gas_fear": 0.12,
-    // Health lost per tick per unit of gas.
-    "gas_damage": 0.004,
+    // Health lost per tick per unit of gas (protesters only; gas alone never takes anyone below incapacitated).
+    "gas_damage": 0.0008,
     // Fatigue per tick per unit of gas.
-    "gas_fatigue": 0.01,
+    "gas_fatigue": 0.002,
     // Per-tick decay of smoke.
     "smoke_decay": 0.985,
     // Radius of an organizer's chant (m).
     "chant_radius": 12.0,
     // Morale per tick from a chant at full strength.
-    "chant_morale": 0.004,
+    "chant_morale": 0.0003,
     // Organizer fatigue per tick while chanting.
-    "chant_cost": 0.0015,
-    // Per-tick morale loss when nothing lifts it.
-    "morale_decay": 0.0005,
+    "chant_cost": 0.00004,
+    // Per-tick morale loss when nothing lifts it, at moderate fear (fear speeds it up).
+    "morale_decay": 0.00001,
     // Fatigue per tick while walking.
-    "fatigue_walk": 0.00012,
+    "fatigue_walk": 0.000006,
     // Fatigue per tick while running.
-    "fatigue_run": 0.0008,
+    "fatigue_run": 0.00004,
     // Extra fatigue per tick at full heat.
-    "fatigue_heat": 0.0001,
+    "fatigue_heat": 0.000004,
     // Fatigue recovered per tick while resting.
-    "rest_recover": 0.0015,
+    "rest_recover": 0.0001,
     // Fatigue recovered by drinking.
     "water_recover": 0.25,
     // Health restored per tick at a medic post.

@@ -22,6 +22,7 @@ commands:
   bench        per-phase ms/tick (p50, p99) against the DESIGN §3.1 budget
   determinism  identical state hash on every tick at several thread counts
   alloc        zero heap allocations per tick after warm-up
+  hashes       print the state hash after every tick (compare builds with diff)
   mapsize      the same crowd on a 512 m and an 8 km map costs the same
   resolve      auto-resolve: run to the end and print the RiotOutcome
   gen-map      write a generated city as Tiled JSON (--out PATH --size M --seed X)
@@ -59,6 +60,7 @@ fn main() -> ExitCode {
         "bench" => bench::bench(&args),
         "determinism" => determinism(&args),
         "alloc" => alloc::check(&args),
+        "hashes" => hashes(&args),
         "mapsize" => bench::mapsize(&args),
         "resolve" => resolve(&args),
         "gen-map" => scenario::gen_map(&args),
@@ -308,6 +310,30 @@ fn determinism(args: &Args) -> Result<(), String> {
         }
     }
     println!("identical state hash on every tick at {list:?} threads");
+    Ok(())
+}
+
+/// One line per tick: two builds (say x86-64-v3 and baseline x86-64) must
+/// print the same file.
+fn hashes(args: &Args) -> Result<(), String> {
+    use std::io::Write;
+    let sc = scenario::load(args)?;
+    let ticks = args.u32("ticks").unwrap_or(1200);
+    let threads = args.usize("threads").unwrap_or_else(default_threads);
+    let pool = pool(threads);
+    let hashes = pool.install(|| -> Result<Vec<u64>, String> {
+        let mut w = World::new(&sc.setup, &sc.map, sc.tunables).map_err(|e| e.to_string())?;
+        Ok((0..ticks)
+            .map(|_| {
+                w.tick(&[]);
+                w.state_hash()
+            })
+            .collect())
+    })?;
+    let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+    for (t, h) in hashes.iter().enumerate() {
+        writeln!(out, "{} {h:016x}", t + 1).map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 

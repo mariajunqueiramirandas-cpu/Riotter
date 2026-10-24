@@ -158,7 +158,7 @@ pub fn write(w: &mut World) {
 
     // Field layers every few ticks.
     let every = w.snap_cfg.fields_every;
-    if every > 0 && w.tick % every == 0 {
+    if every > 0 && w.tick.is_multiple_of(every) {
         let f = &w.fields;
         let fs = &mut s.fields;
         fs.tick = w.tick;

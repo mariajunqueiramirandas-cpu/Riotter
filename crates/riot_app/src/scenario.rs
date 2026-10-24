@@ -32,11 +32,17 @@ pub fn load_world(args: &Args) -> Result<Loaded, String> {
         }
     };
     if let Some(path) = &args.tunables {
-        let values = hotreload::read_tunables(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let values =
+            hotreload::read_tunables(path).map_err(|e| format!("{}: {e}", path.display()))?;
         for name in hotreload::apply(&values, &mut tunables) {
             eprintln!("{}: unknown tunable `{name}`", path.display());
         }
         watch = Some(path.clone());
     }
-    Ok(Loaded { map, setup, tunables, watch })
+    Ok(Loaded {
+        map,
+        setup,
+        tunables,
+        watch,
+    })
 }

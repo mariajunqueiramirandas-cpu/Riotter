@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  lint:
+    name: fmt and clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: tests (release)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Behaviour, determinism and zero-allocation tests simulate thousands
+      # of agents for minutes of game time: they need optimized code.
+      - run: cargo test --release --workspace
+      - name: Determinism across thread counts (headless)
+        run: cargo run --release -p riot_headless -- determinism --scenario data/scenarios/small_protest.ron --ticks 1200 --list 1,2,4
+      - name: Zero allocations per tick (headless)
+        run: cargo run --release -p riot_headless -- alloc --scenario data/scenarios/small_protest.ron --warmup 1200 --ticks 600
+
+  isa:
+    name: same state on x86-64-v3 and baseline x86-64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # .cargo/config.toml builds for x86-64-v3; RUSTFLAGS overrides it for
+      # the baseline build (DESIGN §12, §15). Both must agree tick by tick.
+      - name: Hashes with AVX2/FMA (x86-64-v3)
+        run: |
+          cargo build --release -p riot_headless --target-dir target/v3
+          target/v3/release/riot_headless hashes --scenario data/scenarios/small_protest.ron --ticks 1500 > v3.txt
+      - name: Hashes on baseline x86-64
+        env:
+          RUSTFLAGS: -C target-cpu=x86-64
+        run: |
+          cargo build --release -p riot_headless --target-dir target/base
+          target/base/release/riot_headless hashes --scenario data/scenarios/small_protest.ron --ticks 1500 > base.txt
+      - run: diff v3.txt base.txt && tail -1 v3.txt
+
+  msrv:
+    name: builds on the minimum Rust (1.88)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-targets
+
+  bench:
+    name: tick budget report
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Shared CI runners are too noisy to gate on; this records the
+      # per-phase timings against DESIGN §3.1 for the run summary.
+      - name: Benchmark the standard riot
+        run: |
+          cargo run --release -p riot_headless -- bench --scenario data/scenarios/standard_riot.ron --warmup 4800 --ticks 600 | tee bench.txt
+          { echo '```'; cat bench.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

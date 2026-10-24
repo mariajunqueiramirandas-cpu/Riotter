@@ -339,7 +339,7 @@ impl Police {
         }
     }
 
-    pub fn hash(&self, h: &mut StateHasher) {
+    pub fn hash_into(&self, h: &mut StateHasher) {
         h.write_u32(self.escalation as u32);
         h.write_f32(self.violence);
         for s in &self.squads {
@@ -466,7 +466,7 @@ pub fn director(w: &mut World) {
         }
     }
     let every = w.tun.director_interval.max(1.0) as u32;
-    if tick % every == 0 {
+    if tick.is_multiple_of(every) {
         clusters(w);
         escalate(w);
         assign(w);
@@ -1406,11 +1406,11 @@ fn spray(w: &mut World, v: usize) {
             w.people.stat[j][stat::FLAGS] |= flag::DOWN;
         }
     }
-    if hit_any && tick % 20 == 0 {
+    if hit_any && tick.is_multiple_of(20) {
         w.outcome
             .police_act(tick, veh.pos, veh.spray, &w.fields, 0.5, u32::MAX);
     }
-    if !hit_any && tick % 40 == 0 {
+    if !hit_any && tick.is_multiple_of(40) {
         w.police.vehicles[v].state = VehicleState::Parked;
     }
 }

@@ -92,10 +92,13 @@ start with `//`.
 
     // kind: MarchTo (default), Hold or Disperse. area: a named area of the
     // map, or leave it out and give pos: (x, y) metres from the map centre
-    // and radius. radius 0 with an area uses the area's own. weight counts
-    // in ground held (default 1). announced: every arriving protester knows
-    // it (default false). stance: Peaceful (default), Defensive or
-    // Confrontational.
+    // and radius. radius 0 with an area uses the area's own. weight: how
+    // much the crowd wants it, which counts in ground held (default 1).
+    // announced: arriving protesters know it (default false); with several
+    // announced, each arrival comes for one of them, by weight and by how
+    // well its stance suits them (radicals lean confrontational). Plans not
+    // announced wait for an organizer's broadcast. stance: Peaceful
+    // (default), Defensive or Confrontational.
     objectives: [
         (name: "Rally at the square", kind: MarchTo, area: "central_square", announced: true),
         (name: "Hold the corner", kind: Hold, pos: (120.0, -40.0), radius: 15.0, stance: Defensive),

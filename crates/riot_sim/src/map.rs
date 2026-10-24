@@ -170,7 +170,7 @@ impl Map {
     /// radius plus slack).
     pub fn build(def: &MapDef, margin: f32) -> Result<Map, MapError> {
         let extent = def.width.max(def.height);
-        if !(extent > 0.0) {
+        if extent.is_nan() || extent <= 0.0 {
             return Err(MapError::Empty);
         }
         if extent > LARGEST_MAP {
@@ -927,7 +927,7 @@ impl Map {
             list.push((a, b, d));
             list.push((b, a, d));
         }
-        list.sort_unstable_by(|x, y| (x.0, x.1).cmp(&(y.0, y.1)));
+        list.sort_unstable_by_key(|x| (x.0, x.1));
         list.dedup_by(|x, y| x.0 == y.0 && x.1 == y.1);
         for &(a, _, _) in &list {
             start[a as usize + 1] += 1;

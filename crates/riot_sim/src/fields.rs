@@ -12,7 +12,8 @@ use rayon::prelude::*;
 use riot_core::Vec2;
 use riot_core::grid::{GridGeom, demorton2};
 use riot_core::lanes::{self, CHUNK_AGENTS};
-use riot_core::math::{narrow_u8, widen_u8};
+use riot_core::math::{dither_u8, widen_u8};
+use riot_core::rng::{Stream, roll, unit};
 
 use crate::archetype::{ARCHETYPES, Archetype, ArchetypeParams};
 use crate::map::Map;
@@ -827,12 +828,25 @@ pub struct AbsorbParams<'a> {
     pub arch: &'a [ArchetypeParams; ARCHETYPES],
     pub tun: &'a Tunables,
     pub heat: f32,
+    pub seed: u64,
+    pub tick: u32,
+}
+
+/// Health lost to `harm` (a fraction of full health): whole units, plus one
+/// more with the probability of the remainder, so doses smaller than a unit
+/// per tick still add up.
+#[inline]
+fn harm_units(harm: f32, bits: u64) -> u8 {
+    let h = harm * 255.0;
+    let whole = h as u32;
+    (whole + (unit(bits) < h - whole as f32) as u32).min(255) as u8
 }
 
 /// Contagion (DESIGN §8 absorb): each agent moves its emotions toward the
 /// fields at its position and reacts to gas, chants and fire. Element-wise:
-/// each agent writes only to itself.
-pub fn absorb(f: &Fields, p: &mut People, sp: &Spatial, ap: &AbsorbParams) {
+/// each agent writes only to itself. Returns how many protesters and how
+/// many officers gas or fire injured this tick.
+pub fn absorb(f: &Fields, p: &mut People, sp: &Spatial, ap: &AbsorbParams) -> (u32, u32) {
     let len = p.len;
     let chunks = p.chunks();
     let tun = ap.tun;
@@ -842,12 +856,14 @@ pub fn absorb(f: &Fields, p: &mut People, sp: &Spatial, ap: &AbsorbParams) {
     let vy = lanes::flat(&p.vel_y);
     let emo_all = &mut p.emo[..chunks * CHUNK_AGENTS];
     let stat_all = &mut p.stat[..chunks * CHUNK_AGENTS];
+    let ids = &p.stable_id;
     emo_all
         .par_chunks_mut(CHUNK_AGENTS)
         .zip(stat_all.par_chunks_mut(CHUNK_AGENTS))
         .enumerate()
-        .for_each(|(c, (es, ss))| {
+        .map(|(c, (es, ss))| {
             let base = c * CHUNK_AGENTS;
+            let mut injured = (0u32, 0u32);
             for k in 0..es.len() {
                 let i = base + k;
                 if i >= len || ss[k][stat::FLAGS] & flag::DEAD != 0 {
@@ -861,7 +877,8 @@ pub fn absorb(f: &Fields, p: &mut People, sp: &Spatial, ap: &AbsorbParams) {
                 let mut anger = widen_u8(e[emo::ANGER]);
                 let mut morale = widen_u8(e[emo::MORALE]);
                 let mut fatigue = widen_u8(e[emo::FATIGUE]);
-                let mut hp = widen_u8(ss[k][stat::HEALTH]);
+                let mut harm = 0.0;
+                let mut gas_harm = 0.0;
                 let w = pr.get(f, Layer::Weight);
                 let threat = (pr.get(f, Layer::Threat) * 0.1).min(1.0);
                 if !officer {
@@ -894,14 +911,17 @@ pub fn absorb(f: &Fields, p: &mut People, sp: &Spatial, ap: &AbsorbParams) {
                     let g = gas.min(4.0) * if officer { 0.25 } else { 1.0 };
                     fear += tun.gas_fear * g;
                     fatigue += tun.gas_fatigue * g;
-                    hp -= tun.gas_damage * g;
+                    // Officers wear masks.
+                    if !officer {
+                        gas_harm = tun.gas_damage * g;
+                    }
                     if gas > 0.3 {
                         ss[k][stat::FLAGS] |= flag::URGENT;
                     }
                 }
                 let fire = pr.get(f, Layer::Fire);
                 if fire > 0.05 {
-                    hp -= tun.fire_damage * fire;
+                    harm += tun.fire_damage * fire;
                     fear += 0.05 * fire;
                     ss[k][stat::FLAGS] |= flag::URGENT;
                 }
@@ -909,7 +929,7 @@ pub fn absorb(f: &Fields, p: &mut People, sp: &Spatial, ap: &AbsorbParams) {
                 let r = tun.emotion_relax;
                 fear += r * (a.base_fear - fear);
                 anger += r * (a.base_anger - anger);
-                morale -= tun.morale_decay * (1.0 - fear * 0.5);
+                morale -= tun.morale_decay * (0.5 + fear);
                 // Fatigue from moving and heat; rest recovers it.
                 let speed2 = vx[i] * vx[i] + vy[i] * vy[i];
                 let act = Action::from_u8(ss[k][stat::ACTION]);
@@ -924,13 +944,33 @@ pub fn absorb(f: &Fields, p: &mut People, sp: &Spatial, ap: &AbsorbParams) {
                     dfat -= tun.rest_recover * 0.25;
                 }
                 fatigue += dfat / a.stamina;
-                e[emo::FEAR] = narrow_u8(fear);
-                e[emo::ANGER] = narrow_u8(anger);
-                e[emo::MORALE] = narrow_u8(morale);
-                e[emo::FATIGUE] = narrow_u8(fatigue);
-                ss[k][stat::HEALTH] = narrow_u8(hp);
+                // Rates are far below one byte step per tick: dither.
+                let bits = roll(ap.seed, ap.tick, ids[i], Stream::Emotion);
+                e[emo::FEAR] = dither_u8(fear, bits);
+                e[emo::ANGER] = dither_u8(anger, bits >> 16);
+                e[emo::MORALE] = dither_u8(morale, bits >> 32);
+                e[emo::FATIGUE] = dither_u8(fatigue, bits >> 48);
+                if harm + gas_harm > 0.0 {
+                    let hp = ss[k][stat::HEALTH];
+                    let bits = roll(ap.seed, ap.tick, ids[i], Stream::Hazard);
+                    // Gas alone wears people down but does not kill.
+                    let gassed = hp
+                        .saturating_sub(harm_units(gas_harm, bits))
+                        .max(hp.min(health::INCAPACITATED));
+                    let after = gassed.saturating_sub(harm_units(harm, bits.rotate_left(24)));
+                    if hp >= health::INJURED && after < health::INJURED {
+                        if officer {
+                            injured.1 += 1;
+                        } else {
+                            injured.0 += 1;
+                        }
+                    }
+                    ss[k][stat::HEALTH] = after;
+                }
             }
-        });
+            injured
+        })
+        .reduce(|| (0, 0), |a, b| (a.0 + b.0, a.1 + b.1))
 }
 
 #[cfg(test)]

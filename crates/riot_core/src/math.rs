@@ -212,6 +212,14 @@ pub fn narrow_u8(x: f32) -> u8 {
     (x * 255.0 + 0.5) as u8
 }
 
+/// Like [`narrow_u8`] but rounding up with the probability of the remainder
+/// (`bits` supplies 16 random bits), so a value nudged by much less than one
+/// step per tick still moves at the right rate on average.
+#[inline]
+pub fn dither_u8(x: f32, bits: u64) -> u8 {
+    (x * 255.0 + (bits & 0xffff) as f32 * (1.0 / 65536.0)) as u8
+}
+
 /// Closest point on segment `a..b` to `p`.
 #[inline]
 pub fn closest_on_segment(p: Vec2, a: Vec2, b: Vec2) -> Vec2 {
@@ -274,6 +282,23 @@ pub fn sweep_circle(p0: Vec2, p1: Vec2, c: Vec2, r: f32) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dithering_keeps_small_rates() {
+        // 0.0003 per step is a sixth of a byte step: rounding to nearest
+        // loses all of it, dithering keeps it on average.
+        let (mut near, mut dith) = (100u8, 100u8);
+        for t in 0..1000u32 {
+            near = narrow_u8(widen_u8(near) + 0.0003);
+            dith = dither_u8(widen_u8(dith) + 0.0003, crate::rng::mix(t as u64));
+        }
+        assert_eq!(near, 100);
+        let expected = 100.0 + 1000.0 * 0.0003 * 255.0;
+        assert!((dith as f32 - expected).abs() < 8.0, "{dith} vs {expected}");
+        assert_eq!(dither_u8(1.0, u64::MAX), 255);
+        assert_eq!(dither_u8(-0.1, u64::MAX), 0);
+        assert_eq!(dither_u8(0.0, 0), 0);
+    }
 
     #[test]
     fn heading_table_is_accurate() {

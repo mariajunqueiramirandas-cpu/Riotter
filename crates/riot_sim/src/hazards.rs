@@ -139,7 +139,7 @@ impl Hazards {
         self.fire_live = true;
     }
 
-    pub fn hash(&self, h: &mut StateHasher) {
+    pub fn hash_into(&self, h: &mut StateHasher) {
         for e in &self.emitters {
             h.write_f32(e.pos.x);
             h.write_f32(e.pos.y);
@@ -352,7 +352,7 @@ fn fire(w: &mut World, tick: u32) {
         pr.health = pr.health.saturating_sub(if f > 0.1 { 1 } else { 0 });
         if pr.health == 0 {
             pr.flags = (pr.flags | prop_flag::DESTROYED) & !prop_flag::BURNING;
-        } else if f <= 0.0 && tick % 20 == 0 {
+        } else if f <= 0.0 && tick.is_multiple_of(20) {
             pr.flags &= !prop_flag::BURNING;
         }
     }

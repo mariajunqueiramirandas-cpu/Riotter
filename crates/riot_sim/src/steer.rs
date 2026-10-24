@@ -147,10 +147,8 @@ pub fn steer(
                         if let Some(o) = cx.objectives.get(slot as usize).filter(|o| o.active) {
                             let d2 = (o.pos - pos).len2();
                             let inside = d2 < o.radius * o.radius;
-                            if !inside {
-                                if let Some(d) = route(slot, rec, o.pos) {
-                                    desired = d * speed;
-                                }
+                            if !inside && let Some(d) = route(slot, rec, o.pos) {
+                                desired = d * speed;
                             }
                             if inside || desired == Vec2::ZERO {
                                 // In the area: drift to a personal spot.

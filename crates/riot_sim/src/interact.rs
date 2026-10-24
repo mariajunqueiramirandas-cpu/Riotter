@@ -187,7 +187,7 @@ fn emit(w: &mut World) {
                         }
                     }
                     Action::SeekSupply => {
-                        if (tick + stable) % 10 == 0 {
+                        if (tick + stable).is_multiple_of(10) {
                             let want = if target == 1 {
                                 SupplyKind::Medic
                             } else {
@@ -208,7 +208,7 @@ fn emit(w: &mut World) {
                         }
                     }
                     Action::Barricade => {
-                        if (tick + stable) % 10 == 0 && target != aux::NO_TARGET {
+                        if (tick + stable).is_multiple_of(10) && target != aux::NO_TARGET {
                             let spot = field_cell_pos(fields, target);
                             if (spot - pos).len2() < 4.0 {
                                 let mut found = u32::MAX;
@@ -229,32 +229,31 @@ fn emit(w: &mut World) {
                             }
                         }
                     }
-                    Action::GoHome | Action::March | Action::Flee => {
-                        if (tick + stable) % 10 == 0 {
-                            for (e, ent) in entries.iter().enumerate() {
-                                if closed[e] {
-                                    continue;
-                                }
-                                let r = tun.exit_radius.max(ent.radius * 0.5);
-                                if (ent.pos - pos).len2() > r * r {
-                                    continue;
-                                }
-                                let leaving = act == Action::GoHome
-                                    || act == Action::Flee && a == Archetype::Bystander;
-                                let metro =
-                                    act == Action::March && ent.kind == EntryKind::Metro && {
-                                        let slot = intent::objective(p.intent[i]);
-                                        objectives.get(slot as usize).is_some_and(|o| {
-                                            o.active && (o.pos - pos).len() > 1200.0
-                                        })
-                                    };
-                                if leaving || metro {
-                                    push(Event::Leave {
-                                        who: iu,
-                                        entry: e as u32,
-                                    });
-                                    break;
-                                }
+                    Action::GoHome | Action::March | Action::Flee
+                        if (tick + stable).is_multiple_of(10) =>
+                    {
+                        for (e, ent) in entries.iter().enumerate() {
+                            if closed[e] {
+                                continue;
+                            }
+                            let r = tun.exit_radius.max(ent.radius * 0.5);
+                            if (ent.pos - pos).len2() > r * r {
+                                continue;
+                            }
+                            let leaving = act == Action::GoHome
+                                || act == Action::Flee && a == Archetype::Bystander;
+                            let metro = act == Action::March && ent.kind == EntryKind::Metro && {
+                                let slot = intent::objective(p.intent[i]);
+                                objectives
+                                    .get(slot as usize)
+                                    .is_some_and(|o| o.active && (o.pos - pos).len() > 1200.0)
+                            };
+                            if leaving || metro {
+                                push(Event::Leave {
+                                    who: iu,
+                                    entry: e as u32,
+                                });
+                                break;
                             }
                         }
                     }

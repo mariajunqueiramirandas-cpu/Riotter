@@ -75,7 +75,8 @@ fn scenarios_say_what_they_promise() {
     let s = load_scenario(&data().join("scenarios/standard_riot.ron")).unwrap();
     assert_eq!(s.setup.crowd.iter().sum::<u32>(), 10_000);
     assert_eq!(s.setup.police.squads.len(), 30);
-    assert_eq!(s.setup.duration, riot_sim::setup::minutes(10.0));
+    assert_eq!(s.setup.duration, riot_sim::setup::minutes(20.0));
+    assert_eq!(s.setup.objectives.iter().filter(|o| o.announced).count(), 2);
     assert_eq!(
         s.setup.escalation_cap,
         riot_sim::setup::Escalation::GasAndWater
@@ -88,7 +89,8 @@ fn scenarios_say_what_they_promise() {
     );
     let text = std::fs::read_to_string(data().join("scenarios/city_day.ron")).unwrap();
     let file = riot_data::scenario::ScenarioFile::from_ron(&text).unwrap();
-    let (city, _) = riot_data::scenario::load_map_spec("generated:city?size=8192&seed=3", &data()).unwrap();
+    let (city, _) =
+        riot_data::scenario::load_map_spec("generated:city?size=8192&seed=3", &data()).unwrap();
     let day = file.into_setup(&city).unwrap();
     assert!(day.duration >= riot_sim::setup::minutes(4.0 * 60.0));
     assert_eq!(day.comms.shutdown_min, Some(12.0 * 60.0));

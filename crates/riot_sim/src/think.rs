@@ -278,7 +278,7 @@ impl Minds {
 /// Is agent `stable` due to think this tick?
 #[inline]
 pub fn due(stable: u32, tick: u32, k: u32) -> bool {
-    ((mix(stable as u64) as u32).wrapping_add(tick)) % k == 0
+    ((mix(stable as u64) as u32).wrapping_add(tick)).is_multiple_of(k)
 }
 
 struct ThinkCtx<'a> {
@@ -477,10 +477,21 @@ fn think_chunk(
             }
             None => (255, 0),
         };
-        let stance = match intent::stance(it) {
-            Stance::Peaceful => 0,
-            Stance::Defensive => 128,
-            Stance::Confrontational => 255,
+        // The plan's stance weighed against the archetype's own by trust in
+        // organizers, then pushed by anger (DESIGN §2.4).
+        let level = |s: Stance| s as u8 as f32 * 0.5;
+        let own = level(ap.default_stance);
+        let stance = match obj {
+            Some(_) => ap.trust * level(intent::stance(it)) + (1.0 - ap.trust) * own,
+            None => own,
+        };
+        let anger = widen_u8(e[emo::ANGER]);
+        let stance = narrow_u8((stance + (anger - 0.5) * 0.5).clamp(0.0, 1.0));
+        // Provocateurs act enraged whatever they feel: that is their job.
+        let anger_in = if a == Archetype::Provocateur {
+            e[emo::ANGER].max(230)
+        } else {
+            e[emo::ANGER]
         };
         let item = Item::from_u8(cx.cold[ids[k] as usize].item);
         let armed = matches!(item, Item::Bottle | Item::Molotov) || a == Archetype::Radical;
@@ -493,7 +504,7 @@ fn think_chunk(
         let inj_near = cx.fields.sample(Layer::Injured, pos.x, pos.y);
         let row = [
             e[emo::FEAR],
-            e[emo::ANGER],
+            anger_in,
             e[emo::MORALE],
             e[emo::FATIGUE],
             255 - hp,

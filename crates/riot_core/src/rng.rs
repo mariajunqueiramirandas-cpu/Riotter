@@ -29,6 +29,7 @@ pub enum Stream {
     Supply = 10,
     Footage = 11,
     Garble = 12,
+    Emotion = 13,
 }
 
 #[inline]
