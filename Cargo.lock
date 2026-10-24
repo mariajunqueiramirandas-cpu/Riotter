@@ -387,6 +387,8 @@ dependencies = [
 name = "riot_data"
 version = "0.1.0"
 dependencies = [
+ "miniz_oxide 0.8.9",
+ "riot_core",
  "riot_sim",
  "ron",
  "serde",

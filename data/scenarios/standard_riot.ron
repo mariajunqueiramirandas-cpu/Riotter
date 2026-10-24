@@ -1,0 +1,49 @@
+// The benchmark scenario (DESIGN §3): 10,000 people and 30 police squads
+// (300 officers) in the 1 km district for 10 minutes. Everyone arrives in the
+// first four minutes; the crowd wants the square and the parliament, and the
+// state may go as far as gas and water cannon.
+(
+    title: "Standard riot",
+    description: "10,000 people, 30 squads, gas and water allowed: the 3 ms/tick benchmark.",
+    map: "../maps/district.json",
+    tunables: "../tunables.ron",
+    seed: 42,
+    start: "17:30",
+    duration: 10,
+
+    crowd: {
+        "student": 3200,
+        "worker": 3000,
+        "elder": 900,
+        "radical": 1500,
+        "provocateur": 100,
+        "journalist": 200,
+        "bystander": 1100,
+    },
+    organizers: 25,
+    arrivals: [
+        (entry: "edge_*", from: 0, to: 3),
+        (entry: "metro_*", from: 0, to: 4, share: 0.5),
+    ],
+    supplies: (water: 400, medic: 120, shields: 80, barricade: 120),
+
+    police: (
+        vans_per_depot: 4,
+        water_cannons: 2,
+        aggression: 0.6,
+        squads: [
+            // Lines already deployed at the staging points, dealt round-robin.
+            (kind: Line, depot: "depot_*", staging: "staging_*", count: 12),
+            (kind: Riot, depot: "depot_*", count: 10, available: 2),
+            (kind: Snatch, officers: 8, depot: "depot_*", count: 8, available: 4),
+        ],
+    ),
+    escalation_cap: GasAndWater,
+    comms: (mode: Degraded),
+    weather: (wind: (2.0, 1.0), heat: 0.5),
+
+    objectives: [
+        (name: "Take the square", kind: Hold, area: "central_square", announced: true, stance: Defensive),
+        (name: "March on parliament", kind: MarchTo, area: "government_quarter", weight: 2.0, stance: Confrontational),
+    ],
+)
