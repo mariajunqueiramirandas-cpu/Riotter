@@ -48,6 +48,7 @@ tunables! {
     contact_relax = 0.9, "Jacobi relaxation factor for contact push-out.";
     pressure_scale = 6.0, "Push-out per contact iteration (m) → pressure (0..1).";
     pressure_baseline = 0.02, "Push-out per contact iteration (m) that is just walking into people, not pressure.";
+    pressure_smoothing = 0.125, "Per-tick blend of measured into held pressure: a crush needs compression sustained for about half a second.";
     neighbour_skin = 0.15, "Extra reach beyond touching when building neighbour lists (m).";
     sleep_ticks = 40.0, "Ticks of stillness before an agent sleeps.";
     sleep_speed = 0.05, "Speed under which an agent counts as still (m/s).";
@@ -57,6 +58,7 @@ tunables! {
     flow_refresh = 20.0, "Ticks between dynamic cost refreshes per goal.";
     flow_density_cost = 6.0, "Route cost per person per 4 m² field cell.";
     flow_gas_cost = 40.0, "Route cost per unit of gas.";
+    flow_fire_cost = 150.0, "Route cost per unit of fire.";
     avoid_strength = 1.2, "Anticipatory avoidance strength.";
     avoid_horizon = 1.6, "Time-to-collision horizon for avoidance (s).";
     wall_avoid = 0.8, "Wall avoidance strength.";
@@ -76,7 +78,7 @@ tunables! {
     gas_diffuse = 0.18, "Side weight of the 3-tap gas blur.";
     gas_emit = 6.0, "Gas emitted per canister per tick.";
     gas_fear = 0.12, "Fear per tick per unit of gas.";
-    gas_damage = 0.0008, "Health lost per tick per unit of gas (protesters only; gas alone never takes anyone below incapacitated).";
+    gas_damage = 0.00015, "Health lost per tick per unit of gas (protesters only; gas alone leaves at least 86% health).";
     gas_fatigue = 0.002, "Fatigue per tick per unit of gas.";
     smoke_decay = 0.985, "Per-tick decay of smoke.";
     chant_radius = 12.0, "Radius of an organizer's chant (m).";
@@ -90,7 +92,7 @@ tunables! {
     water_recover = 0.25, "Fatigue recovered by drinking.";
     medic_heal = 0.004, "Health restored per tick at a medic post.";
     crush_pressure = 0.7, "Pressure (0..1) above which bodies are crushed.";
-    crush_damage = 0.004, "Health lost per tick at the most excess pressure (fraction of full health).";
+    crush_damage = 0.0008, "Health lost per tick at the most excess pressure (fraction of full health).";
     crush_fear = 0.01, "Fear per tick at the most excess pressure.";
     fall_pressure = 0.85, "Pressure (0..1) above which people may fall.";
     fall_chance = 0.01, "Per-tick fall chance at full excess pressure.";
@@ -106,8 +108,9 @@ tunables! {
     throw_range = 18.0, "Maximum throwing distance (m).";
     throw_speed = 15.0, "Projectile speed (m/s).";
     throw_cooldown = 60.0, "Ticks between throws.";
-    projectile_damage = 0.12, "Health lost to a projectile hit.";
+    projectile_damage = 0.08, "Health lost to a projectile hit.";
     strike_damage = 0.08, "Health lost to a baton strike.";
+    officer_armour = 0.4, "Fraction of a blow or projectile that gets through an officer's helmet and body armour.";
     strike_range = 0.9, "Reach of a strike beyond touching (m).";
     arrest_ticks = 60.0, "Ticks for officers to restrain someone.";
     director_interval = 20.0, "Ticks between police director replans.";
@@ -119,7 +122,7 @@ tunables! {
     water_range = 25.0, "Water cannon reach (m).";
     fire_spread = 0.03, "Per-tick chance fire spreads to a neighbouring fuel cell.";
     fire_burn = 2.0, "Fuel burnt per tick per burning cell.";
-    fire_damage = 0.01, "Health lost per tick standing in fire.";
+    fire_damage = 0.0015, "Health lost per tick standing in full fire.";
     metro_delay = 3600.0, "Ticks a metro ride takes.";
     hold_density = 0.4, "Protesters per m² that count as holding an objective.";
     exit_radius = 4.0, "Distance from an exit at which leaving people disappear (m).";

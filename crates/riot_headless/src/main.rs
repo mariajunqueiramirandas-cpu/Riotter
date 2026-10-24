@@ -232,6 +232,20 @@ fn print_status(w: &mut World, ms: f64) {
         w.hazards.blocked,
         w.hazards.hits
     );
+    let per = |v: &[u32; riot_sim::outcome::HARMS], scale: f32| {
+        riot_sim::outcome::Harm::ALL
+            .iter()
+            .zip(v)
+            .filter(|(_, n)| **n > 0)
+            .map(|(h, n)| format!("{} {:.0}", h.name(), *n as f32 * scale))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    println!(
+        "  harm (people's worth of health): {}; deaths by: {}",
+        per(&w.outcome.harm, 1.0 / 255.0),
+        per(&w.outcome.deaths_by, 1.0)
+    );
     println!(
         "  police: clusters {:?} violence {:.1} squads {:?}; radical anger {:.2}",
         w.police

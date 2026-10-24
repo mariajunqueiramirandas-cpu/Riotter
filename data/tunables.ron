@@ -19,6 +19,8 @@
     "pressure_scale": 6.0,
     // Push-out per contact iteration (m) that is just walking into people, not pressure.
     "pressure_baseline": 0.02,
+    // Per-tick blend of measured into held pressure: a crush needs compression sustained for about half a second.
+    "pressure_smoothing": 0.125,
     // Extra reach beyond touching when building neighbour lists (m).
     "neighbour_skin": 0.15,
     // Ticks of stillness before an agent sleeps.
@@ -37,6 +39,8 @@
     "flow_density_cost": 6.0,
     // Route cost per unit of gas.
     "flow_gas_cost": 40.0,
+    // Route cost per unit of fire.
+    "flow_fire_cost": 150.0,
     // Anticipatory avoidance strength.
     "avoid_strength": 1.2,
     // Time-to-collision horizon for avoidance (s).
@@ -75,8 +79,8 @@
     "gas_emit": 6.0,
     // Fear per tick per unit of gas.
     "gas_fear": 0.12,
-    // Health lost per tick per unit of gas (protesters only; gas alone never takes anyone below incapacitated).
-    "gas_damage": 0.0008,
+    // Health lost per tick per unit of gas (protesters only; gas alone leaves at least 86% health).
+    "gas_damage": 0.00015,
     // Fatigue per tick per unit of gas.
     "gas_fatigue": 0.002,
     // Per-tick decay of smoke.
@@ -104,7 +108,7 @@
     // Pressure (0..1) above which bodies are crushed.
     "crush_pressure": 0.7,
     // Health lost per tick at the most excess pressure (fraction of full health).
-    "crush_damage": 0.004,
+    "crush_damage": 0.0008,
     // Fear per tick at the most excess pressure.
     "crush_fear": 0.01,
     // Pressure (0..1) above which people may fall.
@@ -136,9 +140,11 @@
     // Ticks between throws.
     "throw_cooldown": 60.0,
     // Health lost to a projectile hit.
-    "projectile_damage": 0.12,
+    "projectile_damage": 0.08,
     // Health lost to a baton strike.
     "strike_damage": 0.08,
+    // Fraction of a blow or projectile that gets through an officer's helmet and body armour.
+    "officer_armour": 0.4,
     // Reach of a strike beyond touching (m).
     "strike_range": 0.9,
     // Ticks for officers to restrain someone.
@@ -161,8 +167,8 @@
     "fire_spread": 0.03,
     // Fuel burnt per tick per burning cell.
     "fire_burn": 2.0,
-    // Health lost per tick standing in fire.
-    "fire_damage": 0.01,
+    // Health lost per tick standing in full fire.
+    "fire_damage": 0.0015,
     // Ticks a metro ride takes.
     "metro_delay": 3600.0,
     // Protesters per m² that count as holding an objective.

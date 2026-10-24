@@ -320,6 +320,7 @@ pub fn move_bodies(p: &mut People, s: &mut PhysScratch, events: &mut [Vec<Event>
     // Walking into a standing crowd overlaps by about one step a tick: that
     // is pushing, not pressure. Only compression beyond it counts.
     let baseline = tun.pressure_baseline;
+    let smooth = tun.pressure_smoothing.clamp(0.0, 1.0);
     let (sleep_speed, sleep_ticks) = (tun.sleep_speed, tun.sleep_ticks.clamp(1.0, 255.0) as u8);
     s.partial_peak.clear();
     px.par_chunks_mut(CHUNK_AGENTS)
@@ -399,9 +400,12 @@ pub fn move_bodies(p: &mut People, s: &mut PhysScratch, events: &mut [Vec<Event>
                 let v = v.clamp_len(10.0);
                 vx[k] = v.x;
                 vy[k] = v.y;
-                let pr = ((press[i] * inv_iters - baseline).max(0.0) + wall_push) * pscale;
-                peak = peak.max(pr.min(1.0));
-                pose[k][pose::PRESSURE] = narrow_u8(pr);
+                let pr =
+                    (((press[i] * inv_iters - baseline).max(0.0) + wall_push) * pscale).min(1.0);
+                peak = peak.max(pr);
+                // What hurts is sustained compression, not a collision.
+                let held = widen_u8(pose[k][pose::PRESSURE]);
+                pose[k][pose::PRESSURE] = narrow_u8(held + (pr - held) * smooth);
 
                 // Pose: gait from action and speed; stride from distance.
                 let speed = v.len();

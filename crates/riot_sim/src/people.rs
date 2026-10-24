@@ -205,6 +205,8 @@ pub struct Cold {
     pub filmed: u16,
     /// Hits taken.
     pub hits: u16,
+    /// [`crate::outcome::Harm`] of the last health lost.
+    pub last_harm: u8,
 }
 
 #[cfg(test)]

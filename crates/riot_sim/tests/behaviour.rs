@@ -1,6 +1,8 @@
 //! Behaviour tests on emergent outcomes (DESIGN §19). They catch regressions
 //! while tuning. Heavy: run with `cargo test --release -p riot_sim --test behaviour`.
 
+mod common;
+
 use riot_core::Vec2;
 use riot_sim::archetype::{ARCHETYPES, Archetype, Stance};
 use riot_sim::command::{Command, CommandKind, DebugCommand};
@@ -452,4 +454,33 @@ fn shields_cover_officers_from_the_front() {
         out.iter().all(|&(_, b, h)| b == 1 && h == 0),
         "(offset, blocked, hit) {out:?}"
     );
+}
+
+/// Gas, a burning car and radicals at the police line hurt people, but a
+/// riot is not a massacre: tear gas never kills, officers wear armour,
+/// throws arc over the crowd and routes avoid fire.
+#[test]
+fn a_violent_riot_is_not_a_massacre() {
+    use riot_sim::outcome::Harm;
+    let (map, setup) = common::violent(1200);
+    let script = common::script(&map, 500);
+    let mut w = World::new(&setup, &map, Tunables::default()).unwrap();
+    for _ in 0..3000 {
+        common::step(&mut w, &script);
+    }
+    let o = &w.outcome;
+    eprintln!(
+        "injuries {} deaths {} arrests {}; harm {:?}; deaths by {:?}",
+        o.injuries, o.deaths, o.arrests, o.harm, o.deaths_by
+    );
+    assert!(
+        o.harm[Harm::Gas as usize] > 0,
+        "the gas never reached anyone"
+    );
+    assert!(
+        o.harm[Harm::Projectile as usize] > 0,
+        "nobody threw anything"
+    );
+    assert_eq!(o.deaths_by[Harm::Gas as usize], 0, "gas killed someone");
+    assert!(o.deaths <= 3, "{} deaths", o.deaths);
 }

@@ -17,6 +17,8 @@ use crate::world::{Prop, World, prop_flag};
 pub const SHIELD_HALF_WIDTH: f32 = 0.36;
 /// Radius of a thrown bottle or stone (m): it cannot thread gaps narrower
 /// than its own width.
+/// The last stretch of a throw, in metres, where it is low enough to hit.
+pub const ARC_DESCENT: f32 = 4.0;
 pub const PROJECTILE_RADIUS: f32 = 0.06;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -379,8 +381,12 @@ pub fn projectiles(w: &mut World) {
             landed = true;
         }
         // Bodies and shields: the earliest one the segment touches. A shield
-        // is an oriented segment in front of its officer (DESIGN §14).
+        // is an oriented segment in front of its officer (DESIGN §14). Throws
+        // are aimed at the police and arc over the crowd: officers and raised
+        // shields can be hit anywhere along the flight, anyone else only in
+        // the descent, and nobody lying down.
         let mut hit: Option<(f32, usize, bool)> = None;
+        let descending = (pr.target - p1).len() < ARC_DESCENT;
         if pr.kind != ProjectileKind::Canister {
             let mid = (p0 + p1) * 0.5;
             let reach = (p1 - p0).len() * 0.5 + 1.0;
@@ -390,7 +396,11 @@ pub fn projectiles(w: &mut World) {
             let people = &w.people;
             let sp = &w.spatial;
             sp.query_radius(px, py, mid.x, mid.y, reach, |j| {
-                if people.stable_id[j] == owner || people.stat[j][stat::FLAGS] & flag::DEAD != 0 {
+                let st = people.stat[j];
+                if people.stable_id[j] == owner
+                    || st[stat::FLAGS] & (flag::DEAD | flag::DOWN) != 0
+                    || !descending && !Archetype::from_u8(st[stat::ARCH]).is_officer()
+                {
                     return;
                 }
                 let c = Vec2::new(px[j], py[j]);
@@ -418,7 +428,7 @@ pub fn projectiles(w: &mut World) {
             } else {
                 w.hazards.hits += 1;
                 let dmg = riot_core::narrow_u8(w.tun.projectile_damage);
-                crate::interact::damage(w, j, dmg, pr.owner);
+                crate::interact::damage(w, j, dmg, pr.owner, crate::outcome::Harm::Projectile);
             }
             if pr.kind == ProjectileKind::Molotov {
                 w.hazards.ignite(at, &mut w.fields, &w.map, &mut w.props);

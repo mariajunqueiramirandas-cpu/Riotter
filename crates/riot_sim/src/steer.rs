@@ -280,7 +280,9 @@ pub fn steer(
                             run = true;
                             speed = a.run * (1.0 - 0.4 * fatigue);
                         }
-                        if d > 25.0 && ot.goal != NO_GOAL {
+                        // The director keeps a route goal while the target is
+                        // far or behind a wall.
+                        if d > 2.0 && ot.goal != NO_GOAL {
                             if let Some(dir) = route(ot.goal, rec, ot.pos) {
                                 desired = dir * speed;
                             }
@@ -303,7 +305,13 @@ pub fn steer(
                             .get(stable as usize)
                             .copied()
                             .unwrap_or_default();
-                        let home = (ot.pos - pos).normalize_or_zero();
+                        // A broken officer heads back toward the line's
+                        // side; a hurt one just gets out of reach.
+                        let home = if hp < health::INJURED {
+                            Vec2::ZERO
+                        } else {
+                            (ot.pos - pos).normalize_or_zero()
+                        };
                         desired = (away.normalize_or_zero() + home).normalize_or_zero() * speed;
                     }
                     Action::Board => {}
@@ -341,10 +349,14 @@ pub fn steer(
                 avoid = avoid.clamp_len(1.0) * (1.0 / (1.0 + touching as f32));
                 // In a packed crowd people stop shoving toward a spot they
                 // cannot reach; marchers keep pushing a little, the panicked
-                // push hard. That is how crushes start.
+                // push hard (nobody can run in a crowd, but they try). That
+                // is how crushes start.
                 if touching >= 3 {
                     let patience = match act {
-                        Action::Flee => 1.0,
+                        Action::Flee => {
+                            desired = desired.clamp_len(a.walk);
+                            1.0
+                        }
                         Action::March | Action::GoHome | Action::SeekSupply | Action::Help => 0.6,
                         _ if arch.is_officer() => 0.8,
                         _ => 0.2,

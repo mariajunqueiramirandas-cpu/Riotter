@@ -15,6 +15,7 @@ use crate::archetype::Archetype;
 use crate::event::Event;
 use crate::hazards::ProjectileKind;
 use crate::mapdef::{EntryKind, PropKind};
+use crate::outcome::Harm;
 use crate::police::Arrest;
 use crate::setup::{NotableKind, SupplyKind};
 use crate::state::{Action, Gait, Item, aux, emo, flag, health, intent, pose, stat};
@@ -303,7 +304,8 @@ fn apply(w: &mut World, e: Event) {
             let blocked =
                 w.people.stat[ti][stat::FLAGS] & flag::SHIELD != 0 && facing.dot(-dir) > 0.3;
             if !blocked {
-                damage(w, ti, narrow_u8(w.tun.strike_damage), attacker);
+                let cause = if police { Harm::Baton } else { Harm::Blow };
+                damage(w, ti, narrow_u8(w.tun.strike_damage), attacker, cause);
             }
             let pos = w.people.pos(ti);
             if police {
@@ -474,7 +476,7 @@ fn apply(w: &mut World, e: Event) {
             let hp = w.tun.crush_damage * widen_u8(amount) * 255.0;
             let dmg = (hp + r).floor().clamp(0.0, 255.0) as u8;
             if dmg > 0 {
-                damage(w, i, dmg, u32::MAX);
+                damage(w, i, dmg, u32::MAX, Harm::Crush);
             }
             let fear = w.tun.crush_fear * widen_u8(amount) * 255.0;
             let df = (fear + r).floor().clamp(0.0, 255.0) as u8;
@@ -499,7 +501,11 @@ fn apply(w: &mut World, e: Event) {
                 let h = &mut w.people.stat[i][stat::HEALTH];
                 let before = *h;
                 *h = h.saturating_sub(12);
-                if before >= health::INJURED && *h < health::INJURED {
+                w.outcome.harm[Harm::Crush as usize] += (before - *h) as u32;
+                let s = w.people.stable_id[i] as usize;
+                w.cold[s].last_harm = Harm::Crush as u8;
+                let h = w.people.stat[i][stat::HEALTH];
+                if before >= health::INJURED && h < health::INJURED {
                     w.outcome
                         .injured(Archetype::from_u8(w.people.stat[i][stat::ARCH]).is_officer());
                 }
@@ -539,19 +545,26 @@ fn apply(w: &mut World, e: Event) {
 }
 
 /// Health loss from a blow, a projectile or a crush. `by` is the attacker's
-/// stable id, or `u32::MAX`.
-pub fn damage(w: &mut World, i: usize, amount: u8, by: u32) {
+/// stable id, or `u32::MAX` (a crush, which armour does not help with).
+pub fn damage(w: &mut World, i: usize, amount: u8, by: u32, cause: Harm) {
     let st = &mut w.people.stat[i];
+    let officer = Archetype::from_u8(st[stat::ARCH]).is_officer();
+    let amount = if officer && by != u32::MAX {
+        (amount as f32 * w.tun.officer_armour).round() as u8
+    } else {
+        amount
+    };
     let before = st[stat::HEALTH];
     let after = before.saturating_sub(amount);
     st[stat::HEALTH] = after;
     st[stat::FLAGS] = (st[stat::FLAGS] & !flag::ASLEEP) | flag::URGENT;
-    let officer = Archetype::from_u8(st[stat::ARCH]).is_officer();
+    w.outcome.harm[cause as usize] += (before - after) as u32;
     if before >= health::INJURED && after < health::INJURED {
         w.outcome.injured(officer);
     }
     let s = w.people.stable_id[i] as usize;
     w.cold[s].hits = w.cold[s].hits.saturating_add(1);
+    w.cold[s].last_harm = cause as u8;
     if by != u32::MAX && (by as usize) < w.police.officers.len() {
         // Hit by the police: anger and fear.
         let e = &mut w.people.emo[i];
@@ -572,6 +585,13 @@ fn die(w: &mut World, i: usize) {
     let s = w.people.stable_id[i];
     let a = Archetype::from_u8(w.people.stat[i][stat::ARCH]);
     w.outcome.deaths += 1;
+    // Fire kills in absorb, which leaves no record: being in it says enough.
+    let cause = if w.fields.sample(crate::fields::Layer::Fire, p.x, p.y) > 0.05 {
+        Harm::Fire
+    } else {
+        Harm::from_u8(w.cold[s as usize].last_harm)
+    };
+    w.outcome.deaths_by[cause as usize] += 1;
     if !a.is_officer() && w.cold[s as usize].hits > 0 {
         w.outcome.notable(w.tick, NotableKind::Martyr, p, s);
     }

@@ -902,10 +902,11 @@ impl World {
             seed: self.seed,
             tick,
         };
-        let (hurt, hurt_officers) =
-            crate::fields::absorb(&self.fields, &mut self.people, &self.spatial, &ap);
-        self.outcome.injuries += hurt;
-        self.outcome.officers_injured += hurt_officers;
+        let h = crate::fields::absorb(&self.fields, &mut self.people, &self.spatial, &ap);
+        self.outcome.injuries += h.injured;
+        self.outcome.officers_injured += h.officers_injured;
+        self.outcome.harm[crate::outcome::Harm::Gas as usize] += h.gas;
+        self.outcome.harm[crate::outcome::Harm::Fire as usize] += h.fire;
         if tick.is_multiple_of(20) {
             self.fields.housekeeping(1e-3);
         }

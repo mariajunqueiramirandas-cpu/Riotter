@@ -11,6 +11,49 @@ use crate::setup::{Footage, NotableEvent, NotableKind, RiotOutcome, RiotSetup, S
 use crate::state::{emo, flag, stat};
 use crate::world::{MAX_OBJECTIVES, Objective, World};
 
+/// What took someone's health, for the outcome's breakdown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Harm {
+    /// A police baton.
+    Baton = 0,
+    /// A protester's blow.
+    Blow = 1,
+    Projectile = 2,
+    /// Crowd pressure, falls and trampling.
+    Crush = 3,
+    Fire = 4,
+    Gas = 5,
+}
+
+pub const HARMS: usize = 6;
+
+impl Harm {
+    pub const ALL: [Harm; HARMS] = [
+        Harm::Baton,
+        Harm::Blow,
+        Harm::Projectile,
+        Harm::Crush,
+        Harm::Fire,
+        Harm::Gas,
+    ];
+
+    pub fn from_u8(v: u8) -> Harm {
+        Harm::ALL[(v as usize).min(HARMS - 1)]
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Harm::Baton => "baton",
+            Harm::Blow => "blow",
+            Harm::Projectile => "projectile",
+            Harm::Crush => "crush",
+            Harm::Fire => "fire",
+            Harm::Gas => "gas",
+        }
+    }
+}
+
 pub struct OutcomeAccum {
     pub arrests: u32,
     pub injuries: u32,
@@ -30,6 +73,10 @@ pub struct OutcomeAccum {
     pub spawn_overflow: u32,
     last_viral: u32,
     pub arrived_by: [u32; ARCHETYPES],
+    /// Health lost (in 1/255ths of a person) by cause.
+    pub harm: [u32; HARMS],
+    /// Deaths by the cause of the last health lost.
+    pub deaths_by: [u32; HARMS],
     taken: [bool; MAX_OBJECTIVES],
 }
 
@@ -54,6 +101,8 @@ impl OutcomeAccum {
             spawn_overflow: 0,
             last_viral: 0,
             arrived_by: [0; ARCHETYPES],
+            harm: [0; HARMS],
+            deaths_by: [0; HARMS],
             taken: [false; MAX_OBJECTIVES],
         }
     }

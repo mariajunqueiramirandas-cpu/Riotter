@@ -658,6 +658,9 @@ fn nearest_officer(cx: &ThinkCtx, pos: Vec2, range: f32) -> Option<u32> {
         if j == u32::MAX {
             continue;
         }
+        if cx.stat_ro[j as usize][stat::FLAGS] & flag::DOWN != 0 {
+            continue;
+        }
         let q = Vec2::new(cx.px[j as usize], cx.py[j as usize]);
         let d2 = (q - pos).len2();
         if d2 < range * range && best.is_none_or(|b| d2 < b.0) {
@@ -724,7 +727,10 @@ fn think_officer(cx: &ThinkCtx, i: usize, st: &mut [u8; 4], ax: &mut u32, stable
     let mut target = aux::NO_TARGET;
     if cx.police.escorting.contains(stable) {
         act = Action::Escort;
-    } else if fear > cx.tun.officer_break_fear && (squad.morale < 0.45 || fatigue > 0.8) {
+    } else if st[stat::HEALTH] < health::INJURED
+        || fear > cx.tun.officer_break_fear && (squad.morale < 0.45 || fatigue > 0.8)
+    {
+        // Hurt officers fall back out of the line.
         act = Action::Break;
     } else if squad.doctrine == Doctrine::Snatch && squad.target_person != u32::MAX {
         act = Action::Arrest;
@@ -752,7 +758,8 @@ fn think_officer(cx: &ThinkCtx, i: usize, st: &mut [u8; 4], ax: &mut u32, stable
         if r < eager {
             for &j in cx.sp.neighbours(i) {
                 let j = j as usize;
-                if is_officer_stat(cx.stat_ro[j]) {
+                // Not someone already on the ground.
+                if is_officer_stat(cx.stat_ro[j]) || cx.stat_ro[j][stat::FLAGS] & flag::DOWN != 0 {
                     continue;
                 }
                 let d = Vec2::new(cx.px[j], cx.py[j]) - pos;

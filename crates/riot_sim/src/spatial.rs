@@ -18,7 +18,7 @@ use riot_core::{Buckets, RadixSort24};
 
 use crate::archetype::{ARCHETYPES, ArchetypeParams};
 use crate::people::People;
-use crate::state::{Gait, flag, pose, stat};
+use crate::state::{Action, Gait, flag, pose, stat};
 
 /// Neighbour list capacity (DESIGN §7.3).
 pub const K: usize = 8;
@@ -175,11 +175,14 @@ impl Spatial {
                     let a = &arch[st[stat::ARCH] as usize];
                     let down = Gait::from_u8(p.pose[i][pose::GAIT]).is_down();
                     rad[k] = a.radius;
-                    // Fallen people are hard to shift; sleepers are moved by nobody.
+                    // Fallen people are hard to shift; sleepers are moved by
+                    // nobody; a snatch squad shoves its way in with shields.
                     inv_m[k] = if st[stat::FLAGS] & flag::ASLEEP != 0 {
                         0.0
                     } else if down {
                         1.0 / (a.mass * 3.0)
+                    } else if st[stat::ACTION] == Action::Arrest as u8 {
+                        1.0 / (a.mass * 4.0)
                     } else {
                         1.0 / a.mass
                     };

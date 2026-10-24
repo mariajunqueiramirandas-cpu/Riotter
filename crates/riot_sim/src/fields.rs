@@ -832,6 +832,9 @@ pub struct AbsorbParams<'a> {
     pub tick: u32,
 }
 
+/// The least health gas alone leaves anyone with.
+const GAS_FLOOR: u8 = 220;
+
 /// Health lost to `harm` (a fraction of full health): whole units, plus one
 /// more with the probability of the remainder, so doses smaller than a unit
 /// per tick still add up.
@@ -842,11 +845,31 @@ fn harm_units(harm: f32, bits: u64) -> u8 {
     (whole + (unit(bits) < h - whole as f32) as u32).min(255) as u8
 }
 
+/// What gas and fire did in one tick of [`absorb`].
+#[derive(Clone, Copy, Default)]
+pub struct AbsorbHarm {
+    pub injured: u32,
+    pub officers_injured: u32,
+    /// Health lost, in 1/255ths of a person.
+    pub gas: u32,
+    pub fire: u32,
+}
+
+impl AbsorbHarm {
+    fn add(self, o: AbsorbHarm) -> AbsorbHarm {
+        AbsorbHarm {
+            injured: self.injured + o.injured,
+            officers_injured: self.officers_injured + o.officers_injured,
+            gas: self.gas + o.gas,
+            fire: self.fire + o.fire,
+        }
+    }
+}
+
 /// Contagion (DESIGN §8 absorb): each agent moves its emotions toward the
 /// fields at its position and reacts to gas, chants and fire. Element-wise:
-/// each agent writes only to itself. Returns how many protesters and how
-/// many officers gas or fire injured this tick.
-pub fn absorb(f: &Fields, p: &mut People, sp: &Spatial, ap: &AbsorbParams) -> (u32, u32) {
+/// each agent writes only to itself.
+pub fn absorb(f: &Fields, p: &mut People, sp: &Spatial, ap: &AbsorbParams) -> AbsorbHarm {
     let len = p.len;
     let chunks = p.chunks();
     let tun = ap.tun;
@@ -863,7 +886,7 @@ pub fn absorb(f: &Fields, p: &mut People, sp: &Spatial, ap: &AbsorbParams) -> (u
         .enumerate()
         .map(|(c, (es, ss))| {
             let base = c * CHUNK_AGENTS;
-            let mut injured = (0u32, 0u32);
+            let mut out = AbsorbHarm::default();
             for k in 0..es.len() {
                 let i = base + k;
                 if i >= len || ss[k][stat::FLAGS] & flag::DEAD != 0 {
@@ -908,10 +931,10 @@ pub fn absorb(f: &Fields, p: &mut People, sp: &Spatial, ap: &AbsorbParams) -> (u
                 }
                 let gas = pr.get(f, Layer::Gas);
                 if gas > 0.01 {
-                    let g = gas.min(4.0) * if officer { 0.25 } else { 1.0 };
-                    fear += tun.gas_fear * g;
-                    fatigue += tun.gas_fatigue * g;
-                    // Officers wear masks.
+                    // Officers wear masks: gas barely frightens or tires them.
+                    let g = gas.min(4.0);
+                    fear += tun.gas_fear * g * if officer { 0.03 } else { 1.0 };
+                    fatigue += tun.gas_fatigue * g * if officer { 0.25 } else { 1.0 };
                     if !officer {
                         gas_harm = tun.gas_damage * g;
                     }
@@ -953,24 +976,27 @@ pub fn absorb(f: &Fields, p: &mut People, sp: &Spatial, ap: &AbsorbParams) -> (u
                 if harm + gas_harm > 0.0 {
                     let hp = ss[k][stat::HEALTH];
                     let bits = roll(ap.seed, ap.tick, ids[i], Stream::Hazard);
-                    // Gas alone wears people down but does not kill.
+                    // Gas alone wears people down but injures nobody, and
+                    // leaves a margin so a graze is not an injury either.
                     let gassed = hp
                         .saturating_sub(harm_units(gas_harm, bits))
-                        .max(hp.min(health::INCAPACITATED));
+                        .max(hp.min(GAS_FLOOR));
                     let after = gassed.saturating_sub(harm_units(harm, bits.rotate_left(24)));
+                    out.gas += (hp - gassed) as u32;
+                    out.fire += (gassed - after) as u32;
                     if hp >= health::INJURED && after < health::INJURED {
                         if officer {
-                            injured.1 += 1;
+                            out.officers_injured += 1;
                         } else {
-                            injured.0 += 1;
+                            out.injured += 1;
                         }
                     }
                     ss[k][stat::HEALTH] = after;
                 }
             }
-            injured
+            out
         })
-        .reduce(|| (0, 0), |a, b| (a.0 + b.0, a.1 + b.1))
+        .reduce(AbsorbHarm::default, AbsorbHarm::add)
 }
 
 #[cfg(test)]

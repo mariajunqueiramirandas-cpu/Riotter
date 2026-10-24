@@ -9,7 +9,7 @@
 //!    of regions from there to the goal (plus a one-region margin) joins the
 //!    goal's corridor.
 //! 3. **Tiles.** A Dijkstra over tile components (8 m) restricted to the
-//!    corridor gives each tile component a cost. Dynamic costs (density, gas)
+//!    corridor gives each tile component a cost. Dynamic costs (density, gas, fire)
 //!    enter here and are refreshed about once a second.
 //! 4. **Flow tiles.** When people enter a tile, its 16 × 16 direction field is
 //!    built by a cell-level Dijkstra seeded from the downhill neighbour tiles,
@@ -794,14 +794,16 @@ impl FlowSystem {
     }
 }
 
-/// Cost of entering tile `t`: its length plus crowd and gas penalties.
+/// Cost of entering tile `t`: its length plus crowd, gas and fire penalties.
 fn tile_step_cost(map: &Map, fields: &Fields, tun: &Tunables, t: u32) -> u32 {
     let (tx, ty) = (t & (map.tdim - 1), t >> map.tshift);
     let cx = tx as f32 * TILE_M - map.half + TILE_M * 0.5;
     let cy = ty as f32 * TILE_M - map.half + TILE_M * 0.5;
     let dens = fields.sample(Layer::Dens, cx, cy);
     let gas = fields.sample(Layer::Gas, cx, cy);
-    let pen = (tun.flow_density_cost * dens + tun.flow_gas_cost * gas).clamp(0.0, 24.0);
+    let fire = fields.sample(Layer::Fire, cx, cy);
+    let pen = (tun.flow_density_cost * dens + tun.flow_gas_cost * gas + tun.flow_fire_cost * fire)
+        .clamp(0.0, 24.0);
     TILE_STEP + (TILE_STEP as f32 * pen * 0.1) as u32
 }
 
@@ -920,7 +922,7 @@ fn build_tile(
             comp[i as usize] = c;
         }
     }
-    // Per-cell step factor from crowding and gas (sampled per 2 m field cell).
+    // Per-cell step factor from crowding, gas and fire (per 2 m field cell).
     let mut factor = [10u32; 256];
     let fx0 = tx as f32 * TILE_M - map.half;
     let fy0 = ty as f32 * TILE_M - map.half;
@@ -929,7 +931,11 @@ fn build_tile(
             let p = Vec2::new(fx0 + qx as f32 * 2.0 + 1.0, fy0 + qy as f32 * 2.0 + 1.0);
             let dens = fields.value_at(Layer::Dens, p);
             let gas = fields.value_at(Layer::Gas, p);
-            let pen = (tun.flow_density_cost * dens + tun.flow_gas_cost * gas).clamp(0.0, 24.0);
+            let fire = fields.value_at(Layer::Fire, p);
+            let pen = (tun.flow_density_cost * dens
+                + tun.flow_gas_cost * gas
+                + tun.flow_fire_cost * fire)
+                .clamp(0.0, 24.0);
             let f = 10 + (pen * 10.0) as u32;
             for ly in 0..4 {
                 for lx in 0..4 {
