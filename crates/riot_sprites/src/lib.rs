@@ -1,6 +1,6 @@
 //! Procedural sprite sheets and palettes (DESIGN §18.2), as pixel art.
 //!
-//! Every sheet is drawn once at startup per art level ([`crate::art`]), seen
+//! Every sheet is drawn once at startup per art level ([`riot_art`]), seen
 //! from straight above with the person facing +x (forward) and +y to their
 //! right. The vertex shader rotates each sprite by `heading`, so a gait needs
 //! one strip of frames, not 8 or 16 directions.
@@ -20,7 +20,7 @@
 
 use std::f32::consts::TAU;
 
-use crate::art::{self, Shape};
+use riot_art::{self as art, Shape};
 
 /// Metres covered by a cell side; the person stands at the cell centre.
 pub const CELL_M: f32 = 2.0;
@@ -70,7 +70,7 @@ pub mod frame {
     pub const HEAD: u32 = 36;
     /// Cap, helmet, balaclava.
     pub const HEADWEAR: u32 = 52;
-    /// Held items by [`riot_sim::state::Item`] code (0 is unused).
+    /// Held items by `riot_sim::state::Item` code (0 is unused).
     pub const ITEM: u32 = 56;
     /// Lying on the ground: fallen or carried. Body and head in one sheet.
     pub const LYING: u32 = 67;
@@ -1210,7 +1210,7 @@ mod tests {
         }
     }
 
-    /// `RIOT_ATLAS_PNG=/path/atlas.png cargo test -p riot_render dump_atlas -- --ignored`
+    /// `RIOT_ATLAS_PNG=/path/atlas.png cargo test -p riot_sprites dump_atlas -- --ignored`
     /// writes the level-0 atlas (weights shown as R/G/B over grey) for
     /// inspection, and `atlas-1.png` … for the other levels.
     #[test]
@@ -1232,12 +1232,7 @@ mod tests {
             } else {
                 path.replace(".png", &format!("-{level}.png"))
             };
-            macroquad::texture::Image {
-                bytes,
-                width: atlas_w(level) as u16,
-                height: atlas_h(level) as u16,
-            }
-            .export_png(&p);
+            art::png::dump(&p, atlas_w(level), atlas_h(level), &bytes);
         }
     }
 

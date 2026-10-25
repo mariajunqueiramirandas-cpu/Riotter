@@ -27,21 +27,29 @@
 //! People are culled on the CPU only when a new snapshot arrives or the view
 //! leaves the culled area (with a margin); position and heading are
 //! interpolated on the GPU with the frame's alpha.
+//!
+//! The art and the CPU-side geometry live in crates of their own, which do
+//! not wait for macroquad to compile: `riot_art`, `riot_materials`,
+//! `riot_sheets` and `riot_sprites` paint, and `riot_mesh` builds meshes and
+//! the map's ground, roofs and street lamps. The first four are re-exported
+//! here under their module names; [`mesh`], [`map`] and [`lights`] re-export
+//! what they upload and draw from `riot_mesh`.
 
-pub mod art;
 pub mod camera;
 pub mod debug;
 pub mod effects;
 pub mod fields;
 pub mod lights;
 pub mod map;
-pub mod materials;
 pub mod mesh;
 pub mod pipeline;
 pub mod pixel;
 pub mod scene;
-pub mod sheets;
-pub mod sprites;
+
+pub use riot_art as art;
+pub use riot_materials as materials;
+pub use riot_sheets as sheets;
+pub use riot_sprites as sprites;
 
 use macroquad::miniquad::{PassAction, RenderingBackend};
 use macroquad::prelude::*;

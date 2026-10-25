@@ -1,0 +1,12 @@
+[package]
+name = "riot_art"
+description = "Pixel-art primitives for Riotter's procedural sheets: art levels, images, shapes, colour, noise."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

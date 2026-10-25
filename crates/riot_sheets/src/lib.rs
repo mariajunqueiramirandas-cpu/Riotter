@@ -1,13 +1,13 @@
 //! Colour sprite sheets in pixel art: decals on the ground and on roofs, and
 //! the props and vehicles of a riot.
 //!
-//! Sprites are painted from shapes in metres (see [`crate::art::Sheet`]) at
+//! Sprites are painted from shapes in metres (see [`riot_art::Sheet`]) at
 //! every art level, into atlases with the same layout in units of
 //! [`UNIT`] level-0 pixels. Each sprite's cell is sized in whole units around
 //! its nominal size, so a quad of the cell's size in metres shows it texel
 //! for pixel.
 
-use crate::art::{self, Img, P, Rgb, Shape, Sheet, UNIT, hex, mix, rnd, tone};
+use riot_art::{self as art, Img, P, Rgb, Shape, Sheet, UNIT, hex, mix, rnd, tone};
 
 /// Atlas width in units.
 const ATLAS_UNITS: usize = 64;
@@ -940,7 +940,7 @@ mod tests {
         assert!((h[0] * 2.0 - car.cell_m()[0]).abs() < 1e-5);
     }
 
-    /// `RIOT_SHEETS_PNG=/dir cargo test -p riot_render dump_sheets -- --ignored`
+    /// `RIOT_SHEETS_PNG=/dir cargo test -p riot_sheets dump_sheets -- --ignored`
     #[test]
     #[ignore]
     fn dump_sheets() {
@@ -956,12 +956,7 @@ mod tests {
                         p.copy_from_slice(&[96, 104, 96, 255]);
                     }
                 }
-                macroquad::texture::Image {
-                    bytes,
-                    width: img.w as u16,
-                    height: img.h as u16,
-                }
-                .export_png(&format!("{dir}/{name}-{level}.png"));
+                art::png::dump(&format!("{dir}/{name}-{level}.png"), img.w, img.h, &bytes);
             }
         }
     }

@@ -378,6 +378,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "riot_art"
+version = "0.1.0"
+
+[[package]]
 name = "riot_core"
 version = "0.1.0"
 dependencies = [
@@ -455,11 +459,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "riot_materials"
+version = "0.1.0"
+dependencies = [
+ "riot_art",
+]
+
+[[package]]
+name = "riot_mesh"
+version = "0.1.0"
+dependencies = [
+ "riot_art",
+ "riot_materials",
+ "riot_sheets",
+ "riot_sim",
+]
+
+[[package]]
 name = "riot_render"
 version = "0.1.0"
 dependencies = [
  "macroquad",
+ "riot_art",
+ "riot_materials",
+ "riot_mesh",
+ "riot_sheets",
  "riot_sim",
+ "riot_sprites",
+]
+
+[[package]]
+name = "riot_sheets"
+version = "0.1.0"
+dependencies = [
+ "riot_art",
 ]
 
 [[package]]
@@ -471,6 +504,13 @@ dependencies = [
  "rayon",
  "riot_core",
  "riot_team",
+]
+
+[[package]]
+name = "riot_sprites"
+version = "0.1.0"
+dependencies = [
+ "riot_art",
 ]
 
 [[package]]

@@ -7,7 +7,12 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+riot_art.workspace = true
+riot_materials.workspace = true
+riot_mesh.workspace = true
+riot_sheets.workspace = true
 riot_sim.workspace = true
+riot_sprites.workspace = true
 macroquad.workspace = true
 
 [lints]

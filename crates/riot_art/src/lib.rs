@@ -4,10 +4,15 @@
 //! Everything the renderer draws is pixel art generated at start-up, once
 //! per **art level**. Level 0 is drawn at [`DENSITY`] pixels per metre and
 //! each further level at half the one before. The world is rendered into a
-//! buffer at one of these densities (see [`crate::pixel`]), so texels and
+//! buffer at one of these densities (see `riot_render::pixel`), so texels and
 //! buffer pixels line up one to one: every level is drawn as its own clean
 //! pixel art, never a blurred downscale of a bigger one. Sheets keep the same
 //! layout at every level, so normalized texture coordinates never change.
+//!
+//! The sheets themselves live in `riot_materials`, `riot_sheets` and
+//! `riot_sprites`; [`png`] writes them out for the `#[ignore]`d dump tests.
+
+pub mod png;
 
 use std::f32::consts::TAU;
 
