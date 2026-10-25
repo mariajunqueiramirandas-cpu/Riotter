@@ -333,6 +333,10 @@ fn json_round_trips_through_the_loader() {
     assert!(compressed.len() < json.len());
     let loaded = parse_map(&compressed, &p.map_name()).unwrap();
     assert_eq!(loaded, citygen::generate_mapdef(&p));
+    assert_eq!(
+        loaded,
+        citygen::generate_mapdef(&CityParams::new(1024.0, 7))
+    );
 }
 
 #[test]
