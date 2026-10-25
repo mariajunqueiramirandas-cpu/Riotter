@@ -364,21 +364,28 @@ impl Map {
                             w += c[p].1;
                             p += 1;
                         }
-                        let mut row = if p == c.len() || c[p].0 >= xs[TILE as usize - 1] {
+                        let last = xs[TILE as usize - 1];
+                        let mut row = if p == c.len() || c[p].0 >= last {
                             // No crossing up to the last centre: one winding.
                             if w == 0 { u16::MAX } else { 0 }
                         } else {
-                            let mut row = 0u16;
-                            for (lx, &x) in xs.iter().enumerate() {
-                                while p < c.len() && c[p].0 < x {
-                                    w += c[p].1;
-                                    p += 1;
-                                }
+                            // A crossing counts for the cells whose centre is
+                            // right of it, `k..16`; the crossings are sorted,
+                            // so the winding steps at each one in turn.
+                            let mut row = 0u32;
+                            let mut from = 0;
+                            while p < c.len() && c[p].0 < last {
+                                let x = c[p].0;
+                                let k = xs.iter().filter(|&&cx| cx <= x).count();
                                 if w == 0 {
-                                    row |= 1 << lx;
+                                    row |= (1 << k) - (1 << from);
                                 }
+                                (from, w, p) = (k, w + c[p].1, p + 1);
                             }
-                            row
+                            if w == 0 {
+                                row |= (1 << TILE) - (1 << from);
+                            }
+                            row as u16
                         };
                         (ptr[ly], wind[ly]) = (p, w);
                         if !(y > -hh && y < hh) {
