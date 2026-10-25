@@ -167,7 +167,6 @@ fn clusters(w: &mut World) {
     // Accumulate per root, roots in index order.
     #[derive(Clone, Copy)]
     struct Acc {
-        root: u32,
         dens: f64,
         x: f64,
         y: f64,
@@ -179,7 +178,6 @@ fn clusters(w: &mut World) {
         hi: Vec2,
     }
     let mut acc = [Acc {
-        root: u32::MAX,
         dens: 0.0,
         x: 0.0,
         y: 0.0,
@@ -192,6 +190,10 @@ fn clusters(w: &mut World) {
     }; MAX_CLUSTERS * 4];
     let empty = acc[0];
     let mut nacc = 0usize;
+    // Roots are cell indices: look their accumulator up (the same
+    // first-come order as a search).
+    p.acc_of.clear();
+    p.acc_of.resize(p.cells.len(), u32::MAX);
     for k in 0..p.cells.len() {
         let root = find(&mut p.parent, k as u32);
         let (slot, cell, c) = p.cells[k];
@@ -202,14 +204,15 @@ fn clusters(w: &mut World) {
             cy * CC as u32 + cell / CC as u32,
         );
         let (x, y) = f.geom.centre(gx, gy);
-        let e = match acc[..nacc].iter().position(|a| a.root == root) {
-            Some(e) => e,
-            None if nacc < acc.len() => {
-                acc[nacc] = Acc { root, ..empty };
+        let e = match p.acc_of[root as usize] {
+            u32::MAX if nacc < acc.len() => {
+                acc[nacc] = empty;
+                p.acc_of[root as usize] = nacc as u32;
                 nacc += 1;
                 nacc - 1
             }
-            None => continue,
+            u32::MAX => continue,
+            e => e as usize,
         };
         let a = &mut acc[e];
         a.dens += d;
