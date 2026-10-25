@@ -249,7 +249,27 @@ impl Map {
                 }
             }
         }
-        pairs.sort_unstable();
+        // The segments of each tile in segment order, as sorting the pairs
+        // would give: they were pushed in segment order, and a counting sort
+        // by tile keeps that order within a tile.
+        let ntiles = (tdim * tdim) as usize;
+        let mut tile_start = vec![0u32; ntiles + 1];
+        for &(t, _) in &pairs {
+            tile_start[t as usize + 1] += 1;
+        }
+        for t in 0..ntiles {
+            tile_start[t + 1] += tile_start[t];
+        }
+        let mut tile_seg = vec![0u32; pairs.len()];
+        let mut fill = tile_start.clone();
+        for &(t, s) in &pairs {
+            tile_seg[fill[t as usize] as usize] = s;
+            fill[t as usize] += 1;
+        }
+        drop((pairs, fill));
+        let segs_of = |t: u32| {
+            &tile_seg[tile_start[t as usize] as usize..tile_start[t as usize + 1] as usize]
+        };
 
         // --- rasterize per tile row, in parallel
         struct RowOut {
@@ -259,30 +279,29 @@ impl Map {
         let rows: Vec<RowOut> = (0..tdim)
             .into_par_iter()
             .map(|ty| {
-                let lo = pairs.partition_point(|p| p.0 < ty << tshift);
-                let hi = pairs.partition_point(|p| p.0 < (ty + 1) << tshift);
-                let row_pairs = &pairs[lo..hi];
                 // Signed crossings of each cell row's centre line, sorted by x.
                 let mut cross: [Vec<(f32, i32)>; TILE as usize] = Default::default();
-                for &(t, s) in row_pairs {
-                    if s as usize >= solid_segs {
-                        continue;
-                    }
-                    let tx = t & (tdim - 1);
-                    let seg = &segs[s as usize];
-                    for (ly, c) in cross.iter_mut().enumerate() {
-                        let y = (ty * TILE + ly as u32) as f32 * NAV_CELL + NAV_CELL * 0.5 - half;
-                        let sign = if seg.a.y <= y && y < seg.b.y {
-                            1
-                        } else if seg.b.y <= y && y < seg.a.y {
-                            -1
-                        } else {
+                for tx in 0..tdim {
+                    for &s in segs_of((ty << tshift) | tx) {
+                        if s as usize >= solid_segs {
                             continue;
-                        };
-                        let xc =
-                            seg.a.x + (y - seg.a.y) / (seg.b.y - seg.a.y) * (seg.b.x - seg.a.x);
-                        if tile_of(xc) == tx {
-                            c.push((xc, sign));
+                        }
+                        let seg = &segs[s as usize];
+                        for (ly, c) in cross.iter_mut().enumerate() {
+                            let y =
+                                (ty * TILE + ly as u32) as f32 * NAV_CELL + NAV_CELL * 0.5 - half;
+                            let sign = if seg.a.y <= y && y < seg.b.y {
+                                1
+                            } else if seg.b.y <= y && y < seg.a.y {
+                                -1
+                            } else {
+                                continue;
+                            };
+                            let xc =
+                                seg.a.x + (y - seg.a.y) / (seg.b.y - seg.a.y) * (seg.b.x - seg.a.x);
+                            if tile_of(xc) == tx {
+                                c.push((xc, sign));
+                            }
                         }
                     }
                 }
@@ -296,14 +315,8 @@ impl Map {
                     kinds: Vec::with_capacity(tdim as usize),
                     mixed: Vec::new(),
                 };
-                let mut pi = 0usize;
                 for tx in 0..tdim {
-                    let t = (ty << tshift) | tx;
-                    let p0 = pi;
-                    while pi < row_pairs.len() && row_pairs[pi].0 == t {
-                        pi += 1;
-                    }
-                    let tile_segs = &row_pairs[p0..pi];
+                    let tile_segs = segs_of((ty << tshift) | tx);
                     let x0 = tx as f32 * TILE_M - half;
                     let y0 = ty as f32 * TILE_M - half;
                     // Cell centres of the tile's columns, and the columns
@@ -321,7 +334,7 @@ impl Map {
                     // CLEARANCE from the segment, so its clearance test
                     // below would fail anyway (see `clear_box`).
                     seg_cols.clear();
-                    seg_cols.extend(tile_segs.iter().map(|&(_, s)| {
+                    seg_cols.extend(tile_segs.iter().map(|&s| {
                         let b = &boxes[s as usize];
                         let mut cols = 0u16;
                         for (lx, &x) in xs.iter().enumerate() {
@@ -364,7 +377,7 @@ impl Map {
                         row &= cols_in;
                         // Clearance: no wall closer than CLEARANCE. Only the
                         // cells inside a segment's box need the exact test.
-                        for (&(_, s), &cols) in tile_segs.iter().zip(&seg_cols) {
+                        for (&s, &cols) in tile_segs.iter().zip(&seg_cols) {
                             if row == 0 {
                                 break;
                             }
@@ -401,7 +414,7 @@ impl Map {
                     for (q, list) in lists.iter_mut().enumerate() {
                         let bmin = Vec2::new(x0 + (q & 1) as f32 * 4.0, y0 + (q >> 1) as f32 * 4.0);
                         let bmax = bmin + Vec2::new(4.0, 4.0);
-                        for &(_, s) in tile_segs {
+                        for &s in tile_segs {
                             let seg = &segs[s as usize];
                             if seg_box_near(seg, bmin, bmax, margin) {
                                 list.push(s);
