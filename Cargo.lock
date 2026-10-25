@@ -603,6 +603,7 @@ dependencies = [
  "riot_flow",
  "riot_snapshot",
  "riot_tactics",
+ "riot_team",
  "riot_world",
 ]
 

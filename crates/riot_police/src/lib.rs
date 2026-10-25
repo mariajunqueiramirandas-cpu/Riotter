@@ -24,6 +24,7 @@
 use riot_core::Vec2;
 use riot_core::math::widen_u8;
 use riot_core::rng::{Stream, roll_key, unit};
+use riot_team::prelude::*;
 
 use riot_defs::archetype::Archetype;
 use riot_defs::police::{Call, Doctrine, NO_CORDON};
@@ -107,23 +108,39 @@ fn dispatch(w: &mut World, s: usize) {
 fn clusters(w: &mut World) {
     let f = &w.fields;
     let p = &mut w.police;
+    // Find each active slot's dense cells in parallel, then number them in
+    // slot-then-cell order, the order everything below depends on.
+    p.label[..f.pool * CL]
+        .par_chunks_mut(CL)
+        .zip(p.dense[..f.pool * CL].par_chunks_mut(CL))
+        .zip(p.dense_n[..f.pool].par_iter_mut())
+        .enumerate()
+        .for_each(|(slot, ((lab, dense), n))| {
+            *n = 0;
+            if f.slot_chunk[slot] == NO_CHUNK {
+                return;
+            }
+            let mut m = 0;
+            for (cell, &d) in f.layer(slot, Layer::Dens).iter().enumerate() {
+                if d >= 1.0 {
+                    dense[m] = cell as u16;
+                    m += 1;
+                } else {
+                    lab[cell] = u32::MAX;
+                }
+            }
+            *n = m as u32;
+        });
     p.cells.clear();
     p.parent.clear();
     for slot in 0..f.pool {
         let c = f.slot_chunk[slot];
-        let lab = &mut p.label[slot * CL..(slot + 1) * CL];
-        if c == NO_CHUNK {
-            continue;
-        }
-        let dens = f.layer(slot, Layer::Dens);
-        for (cell, &d) in dens.iter().enumerate() {
-            if d >= 1.0 {
-                lab[cell] = p.cells.len() as u32;
-                p.parent.push(p.cells.len() as u32);
-                p.cells.push((slot as u32, cell as u32, c));
-            } else {
-                lab[cell] = u32::MAX;
-            }
+        let dense = &p.dense[slot * CL..][..p.dense_n[slot] as usize];
+        for &cell in dense {
+            let k = p.cells.len() as u32;
+            p.label[slot * CL + cell as usize] = k;
+            p.parent.push(k);
+            p.cells.push((slot as u32, cell as u32, c));
         }
     }
     fn find(par: &mut [u32], mut x: u32) -> u32 {

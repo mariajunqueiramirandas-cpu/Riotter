@@ -169,6 +169,9 @@ pub struct Police {
     pub parent: Vec<u32>,
     /// Each union-find root's cluster accumulator (`u32::MAX`: none yet).
     pub acc_of: Vec<u32>,
+    /// Each slot's dense cells (`CL` per slot), and how many.
+    pub dense: Vec<u16>,
+    pub dense_n: Vec<u32>,
     road_dist: Vec<f32>,
     road_prev: Vec<u32>,
     road_heap: BinaryHeap<Reverse<(u32, u32)>>,
@@ -311,6 +314,8 @@ impl Police {
             cells: Vec::with_capacity(pool * CL),
             parent: Vec::with_capacity(pool * CL),
             acc_of: Vec::with_capacity(pool * CL),
+            dense: vec![0; pool * CL],
+            dense_n: vec![0; pool],
             road_dist: vec![f32::INFINITY; nodes],
             road_prev: vec![u32::MAX; nodes],
             road_heap: BinaryHeap::with_capacity(nodes * 4 + 16),
