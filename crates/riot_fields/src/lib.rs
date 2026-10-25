@@ -204,6 +204,8 @@ pub struct Fields {
     live: Vec<u16>,
     /// Chunks to activate at the start of the next update.
     pub want: Vec<u32>,
+    /// The cameras' views for [`Fields::stamp_cones`], filled by the caller.
+    pub cones: Vec<Cone>,
     pub active: u32,
     pub overflow: u32,
 }
@@ -235,6 +237,7 @@ impl Fields {
             written_n: vec![0; pool],
             live: vec![0; pool],
             want: Vec::with_capacity(pool * 4),
+            cones: Vec::new(),
             active: 0,
             overflow: 0,
         }
@@ -883,6 +886,53 @@ impl Fields {
             });
     }
 
+    /// Set layer `l` of every active chunk to the sum, at each cell, of the
+    /// `v` of the [`Cone`]s in `self.cones` that see it; `rc` is their
+    /// radius in cells. Parallel per chunk: each cell adds its cones in list
+    /// order, as stamping one cone after the other does.
+    pub fn stamp_cones(&mut self, l: Layer, rc: f32) {
+        let li = l as usize;
+        let dim = self.geom.dim as i32;
+        let cdim = self.cdim;
+        let (cones, slot_chunk) = (&self.cones, &self.slot_chunk);
+        self.data
+            .par_chunks_mut(LAYERS * CL)
+            .zip(self.live.par_iter_mut())
+            .enumerate()
+            .for_each(|(slot, (d, live))| {
+                let c = slot_chunk[slot];
+                if c == NO_CHUNK {
+                    return;
+                }
+                let layer = &mut d[li * CL..(li + 1) * CL];
+                if *live & bit(l) != 0 {
+                    layer.fill(0.0);
+                }
+                let (gx, gy) = ((c % cdim * CC as u32) as i32, (c / cdim * CC as u32) as i32);
+                let mut any = false;
+                for k in cones {
+                    let (fx, fy, fwd) = (k.fx, k.fy, k.fwd);
+                    // The cone's cells, as `stamp_cone` loops over them,
+                    // within this chunk.
+                    let y0 = ((fy - rc).floor() as i32).max(0).max(gy);
+                    let y1 = ((fy + rc).ceil() as i32).min(dim).min(gy + CC as i32);
+                    let x0 = ((fx - rc).floor() as i32).max(0).max(gx);
+                    let x1 = ((fx + rc).ceil() as i32).min(dim).min(gx + CC as i32);
+                    for cy in y0..y1 {
+                        for cx in x0..x1 {
+                            let (dx, dy) = (cx as f32 + 0.5 - fx, cy as f32 + 0.5 - fy);
+                            if dx * dx + dy * dy > rc * rc || dx * fwd.x + dy * fwd.y < -0.5 {
+                                continue;
+                            }
+                            layer[(cy - gy) as usize * CC + (cx - gx) as usize] += k.v;
+                            any = true;
+                        }
+                    }
+                }
+                *live = (*live & !bit(l)) | if any { bit(l) } else { 0 };
+            });
+    }
+
     /// Release chunks with no people, no emitters and nothing left; ask for
     /// neighbours of chunks whose gas or smoke reaches their border.
     pub fn housekeeping(&mut self, eps: f32) {
@@ -906,7 +956,11 @@ impl Fields {
                     continue;
                 }
                 let mut edge = 0.0f32;
+                // Layers of +0.0 leave the maxima at +0.0 or above alone.
                 for l in [Layer::Gas, Layer::Smoke] {
+                    if self.is_zero(slot, l) {
+                        continue;
+                    }
                     let v = self.layer(slot, l);
                     for k in 0..CC {
                         let cell = match (dx, dy) {
@@ -936,6 +990,9 @@ impl Fields {
                 Layer::Fire,
                 Layer::Chant,
             ] {
+                if self.is_zero(slot, l) {
+                    continue;
+                }
                 for &v in self.layer(slot, l) {
                     mx = mx.max(v.abs());
                 }
@@ -976,6 +1033,18 @@ pub fn field_cell_pos(f: &Fields, cell: u32) -> Vec2 {
 pub fn field_cell_of(f: &Fields, p: Vec2) -> u32 {
     let (cx, cy) = f.geom.cell_of(p.x, p.y);
     (cy * f.geom.dim + cx) & aux::NO_TARGET.wrapping_sub(1)
+}
+
+/// A camera's view for [`Fields::stamp_cones`]: the cells whose centres are
+/// within the radius of `(fx, fy)` (in cells) and not behind it.
+#[derive(Clone, Copy, Debug)]
+pub struct Cone {
+    pub fx: f32,
+    pub fy: f32,
+    /// Facing.
+    pub fwd: Vec2,
+    /// Added to each cell seen.
+    pub v: f32,
 }
 
 /// The four field cells around a point and its bilinear weights.

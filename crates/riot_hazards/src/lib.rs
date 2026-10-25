@@ -14,7 +14,7 @@ use riot_defs::harm::Harm;
 use riot_defs::mapdef::EntryKind;
 use riot_defs::setup::{DT, NotableKind};
 use riot_defs::state::{Action, flag, intent, pose, stat};
-use riot_fields::{CC, CL, Layer, NO_CHUNK, blur_shift_kernel};
+use riot_fields::{CC, CL, Cone, Layer, NO_CHUNK, blur_shift_kernel};
 use riot_people::Spawn;
 use riot_snapshot::prop_flag;
 use riot_spatial::FIELD_CELL;
@@ -53,10 +53,13 @@ pub fn pin_emitters(w: &mut World) {
 }
 
 /// Cameras: the layer counts the cameras that can see each cell, from
-/// filming journalists and phones (DESIGN §2.7). Every 10 ticks.
+/// filming journalists and phones (DESIGN §2.7). Every 10 ticks. The chunks
+/// are stamped in parallel, each adding the cameras in index order.
 pub fn stamp_cameras(w: &mut World) {
-    w.fields.clear_layer(Layer::Camera);
-    let r = w.tun.camera_radius;
+    let f = &mut w.fields;
+    f.cones.clear();
+    // Room for everyone once, so filming never allocates.
+    f.cones.reserve(w.people.cap);
     for i in 0..w.people.len {
         let st = w.people.stat[i];
         if st[stat::FLAGS] & flag::DEAD != 0 || Action::from_u8(st[stat::ACTION]) != Action::Film {
@@ -65,31 +68,15 @@ pub fn stamp_cameras(w: &mut World) {
         let p = w.people.pos(i);
         // The camera sees a half-disc in front.
         let fwd = Vec2::from_heading(w.people.pose[i][pose::HEADING]);
-        let weight = if Archetype::from_u8(st[stat::ARCH]) == Archetype::Journalist {
+        let v = if Archetype::from_u8(st[stat::ARCH]) == Archetype::Journalist {
             2.0
         } else {
             1.0
         };
-        stamp_cone(w, p, fwd, r, weight);
+        let (fx, fy) = f.geom.to_cell_f(p.x, p.y);
+        f.cones.push(Cone { fx, fy, fwd, v });
     }
-}
-
-fn stamp_cone(w: &mut World, p: Vec2, fwd: Vec2, r: f32, v: f32) {
-    let f = &mut w.fields;
-    let (fx, fy) = f.geom.to_cell_f(p.x, p.y);
-    let rc = r / FIELD_CELL;
-    let dim = f.geom.dim as i32;
-    for cy in ((fy - rc).floor() as i32).max(0)..((fy + rc).ceil() as i32).min(dim) {
-        for cx in ((fx - rc).floor() as i32).max(0)..((fx + rc).ceil() as i32).min(dim) {
-            let (dx, dy) = (cx as f32 + 0.5 - fx, cy as f32 + 0.5 - fy);
-            if dx * dx + dy * dy > rc * rc || dx * fwd.x + dy * fwd.y < -0.5 {
-                continue;
-            }
-            if let Some(s) = f.slot_of_chunk(cx / CC as i32, cy / CC as i32) {
-                f.layer_mut(s, Layer::Camera)[(cy as usize % CC) * CC + cx as usize % CC] += v;
-            }
-        }
-    }
+    f.stamp_cones(Layer::Camera, w.tun.camera_radius / FIELD_CELL);
 }
 
 /// Gas and smoke drift with the wind, diffuse and decay; fire burns fuel and
