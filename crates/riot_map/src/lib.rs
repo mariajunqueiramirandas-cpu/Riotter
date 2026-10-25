@@ -279,15 +279,16 @@ impl Map {
         let rows: Vec<RowOut> = (0..tdim)
             .into_par_iter()
             .map(|ty| {
-                // Signed crossings of each cell row's centre line, sorted by x.
-                let mut cross: [Vec<(f32, i32)>; TILE as usize] = Default::default();
+                // Signed crossings of each cell row's centre line, sorted by x
+                // (as `cross_key`s, then decoded).
+                let mut keys: [Vec<u64>; TILE as usize] = Default::default();
                 for tx in 0..tdim {
                     for &s in segs_of((ty << tshift) | tx) {
                         if s as usize >= solid_segs {
                             continue;
                         }
                         let seg = &segs[s as usize];
-                        for (ly, c) in cross.iter_mut().enumerate() {
+                        for (ly, c) in keys.iter_mut().enumerate() {
                             let y =
                                 (ty * TILE + ly as u32) as f32 * NAV_CELL + NAV_CELL * 0.5 - half;
                             let sign = if seg.a.y <= y && y < seg.b.y {
@@ -300,14 +301,15 @@ impl Map {
                             let xc =
                                 seg.a.x + (y - seg.a.y) / (seg.b.y - seg.a.y) * (seg.b.x - seg.a.x);
                             if tile_of(xc) == tx {
-                                c.push((xc, sign));
+                                c.push(cross_key(xc, sign));
                             }
                         }
                     }
                 }
-                for c in cross.iter_mut() {
-                    c.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-                }
+                let cross = keys.map(|mut k| {
+                    k.sort_unstable();
+                    k.into_iter().map(cross_of_key).collect::<Vec<_>>()
+                });
                 let mut ptr = [0usize; TILE as usize];
                 let mut wind = [0i32; TILE as usize];
                 let mut seg_cols: Vec<u16> = Vec::new();
@@ -1058,6 +1060,25 @@ pub fn transpose_links(m: u16) -> u16 {
     out
 }
 
+/// A key whose unsigned order is the order of `(x, sign)` by `f32::total_cmp`
+/// then `i32::cmp`, so sorting keys sorts crossings exactly as comparing
+/// them would (equal keys are equal crossings). The `x` part is the
+/// `total_cmp` key moved from signed to unsigned order.
+#[inline]
+fn cross_key(x: f32, sign: i32) -> u64 {
+    let b = x.to_bits() as i32;
+    let k = (b ^ (((b >> 31) as u32) >> 1) as i32) as u32 ^ (1 << 31);
+    ((k as u64) << 32) | (sign as u32 ^ (1 << 31)) as u64
+}
+
+/// The crossing a `cross_key` was made from.
+#[inline]
+fn cross_of_key(key: u64) -> (f32, i32) {
+    let k = ((key >> 32) as u32 ^ (1 << 31)) as i32;
+    let b = k ^ (((k >> 31) as u32) >> 1) as i32;
+    (f32::from_bits(b as u32), (key as u32 ^ (1 << 31)) as i32)
+}
+
 /// The box `[x0, x1, y0, y1]` around a segment, CLEARANCE wider on each side
 /// plus slack: a point outside it is more than CLEARANCE from the segment,
 /// so the exact clearance test (`closest_on_segment`, distance squared
@@ -1387,6 +1408,48 @@ mod tests {
             assert_eq!((n, a), (n0, b), "case {case}");
             assert_eq!(labels.unwrap_or([0; 256]), labels0, "case {case}");
         }
+    }
+
+    #[test]
+    fn cross_keys_sort_like_crossings() {
+        let xs = [
+            f32::NEG_INFINITY,
+            -4096.0,
+            -1.5,
+            -f32::MIN_POSITIVE,
+            -0.0,
+            0.0,
+            1e-40,
+            0.25,
+            0.5,
+            4095.75,
+            f32::INFINITY,
+            f32::NAN,
+            -f32::NAN,
+        ];
+        let mut cross: Vec<(f32, i32)> = Vec::new();
+        for &x in &xs {
+            for sign in [-1, 1, i32::MIN, i32::MAX] {
+                cross.push((x, sign));
+            }
+        }
+        let mut seed = 3u64;
+        for _ in 0..1000 {
+            seed = riot_core::mix(seed.wrapping_add(1));
+            cross.push((
+                f32::from_bits(seed as u32),
+                if seed >> 63 == 0 { 1 } else { -1 },
+            ));
+        }
+        for &(x, sign) in &cross {
+            let (x2, sign2) = cross_of_key(cross_key(x, sign));
+            assert_eq!((x.to_bits(), sign), (x2.to_bits(), sign2));
+        }
+        let mut by_key = cross.clone();
+        by_key.sort_unstable_by_key(|&(x, sign)| cross_key(x, sign));
+        cross.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        let bits = |v: &[(f32, i32)]| v.iter().map(|&(x, s)| (x.to_bits(), s)).collect::<Vec<_>>();
+        assert_eq!(bits(&by_key), bits(&cross));
     }
 
     /// Where the cheap box tests say "too far", the exact tests agree: just
