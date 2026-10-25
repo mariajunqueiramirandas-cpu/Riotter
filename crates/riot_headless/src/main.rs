@@ -5,6 +5,7 @@ mod alloc;
 mod args;
 mod bench;
 mod image;
+mod police;
 mod scenario;
 
 use std::process::ExitCode;
@@ -25,6 +26,7 @@ commands:
   hashes       print the state hash after every tick (compare builds with diff)
   mapsize      the same crowd on a 512 m and an 8 km map costs the same
   resolve      auto-resolve: run to the end and print the RiotOutcome
+  police       the police commander's crowds, cordons, squads and radio calls
   gen-map      write a generated city as Tiled JSON (--out PATH --size M --seed X)
   image        write a top-down PNG (--out PATH --px N --scale PX_PER_M --centre X,Y
                --layer dens|fear|anger|threat|gas|camera --every N)
@@ -47,6 +49,8 @@ run options:
   --csv PATH        write per-phase results (bench)
   --list T1,T2,..   thread counts (determinism)             [1,2,4,8]
   --budget          fail when a phase is more than 10% over budget (bench)
+  --every N         ticks between reports (police)              [1200]
+  --detail          predicted routes and every squad (police)
 ";
 
 fn main() -> ExitCode {
@@ -63,6 +67,7 @@ fn main() -> ExitCode {
         "hashes" => hashes(&args),
         "mapsize" => bench::mapsize(&args),
         "resolve" => resolve(&args),
+        "police" => police::police(&args),
         "gen-map" => scenario::gen_map(&args),
         "image" => image::image(&args),
         "help" | "--help" | "-h" => {

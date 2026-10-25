@@ -662,6 +662,9 @@ fn is_officer_stat(st: [u8; 4]) -> bool {
     Archetype::from_u8(st[stat::ARCH]).is_officer()
 }
 
+/// The officer to throw at: the nearest one in range, though a shield
+/// turned this way makes an officer look half as near a target as one
+/// side-on or turned away. Officers hiding in ambush cannot be seen.
 fn nearest_officer(cx: &ThinkCtx, pos: Vec2, range: f32) -> Option<u32> {
     let mut best: Option<(f32, u32)> = None;
     for &s in &cx.police.on_map {
@@ -669,13 +672,21 @@ fn nearest_officer(cx: &ThinkCtx, pos: Vec2, range: f32) -> Option<u32> {
         if j == u32::MAX {
             continue;
         }
-        if cx.stat_ro[j as usize][stat::FLAGS] & flag::DOWN != 0 {
+        let st = cx.stat_ro[j as usize];
+        if st[stat::FLAGS] & flag::DOWN != 0 || st[stat::ACTION] == Action::Lurk as u8 {
             continue;
         }
         let q = Vec2::new(cx.px[j as usize], cx.py[j as usize]);
         let d2 = (q - pos).len2();
-        if d2 < range * range && best.is_none_or(|b| d2 < b.0) {
-            best = Some((d2, s));
+        if d2 >= range * range {
+            continue;
+        }
+        let shielded = st[stat::FLAGS] & flag::SHIELD != 0
+            && Vec2::from_heading(cx.pose[j as usize][pose::HEADING]).dot(pos - q)
+                > 0.3 * d2.sqrt();
+        let score = if shielded { d2 * 4.0 } else { d2 };
+        if best.is_none_or(|b| score < b.0) {
+            best = Some((score, s));
         }
     }
     best.map(|b| b.1)
@@ -736,6 +747,8 @@ fn think_officer(cx: &ThinkCtx, i: usize, st: &mut [u8; 4], ax: &mut u32, stable
     let squad = &cx.police.squads[info.squad as usize];
     let mut act = Action::Formation;
     let mut target = aux::NO_TARGET;
+    let cur = Action::from_u8(st[stat::ACTION]);
+    let grabbing = aux::target(*ax);
     if cx.police.escorting.contains(stable) {
         act = Action::Escort;
     } else if st[stat::HEALTH] < health::INJURED
@@ -746,36 +759,71 @@ fn think_officer(cx: &ThinkCtx, i: usize, st: &mut [u8; 4], ax: &mut u32, stable
     } else if squad.doctrine == Doctrine::Snatch && squad.target_person != u32::MAX {
         act = Action::Arrest;
         target = squad.target_person;
+    } else if squad.doctrine == Doctrine::Ambush {
+        // Crouched around the corner, silent.
+        act = Action::Lurk;
+    } else if cur == Action::Arrest
+        && grabbing != aux::NO_TARGET
+        && squad.doctrine != Doctrine::Snatch
+        && cx.slot_of.get(grabbing as usize).is_some_and(|&j| {
+            j != u32::MAX
+                && Gait::from_u8(cx.pose[j as usize][pose::GAIT]) != Gait::Restrained
+                && (Vec2::new(cx.px[j as usize], cx.py[j as usize]) - Vec2::new(cx.px[i], cx.py[i]))
+                    .len2()
+                    < 36.0
+        })
+    {
+        // Hold on to whoever this officer went for in the charge.
+        act = Action::Arrest;
+        target = grabbing;
     } else if cx.escalation >= Escalation::BatonsAndArrests
         && matches!(
             squad.doctrine,
-            Doctrine::Advance | Doctrine::Disperse | Doctrine::Kettle | Doctrine::HoldLine
+            Doctrine::Advance
+                | Doctrine::Disperse
+                | Doctrine::Kettle
+                | Doctrine::HoldLine
+                | Doctrine::Barricade
+                | Doctrine::Charge
         )
     {
         // Strike an adjacent civilian in front, more readily when angry or
-        // when the area is violent.
+        // when the area is violent; a charge hits whoever is in reach and
+        // grabs the people the police have identified.
         let pos = Vec2::new(cx.px[i], cx.py[i]);
         let fwd = Vec2::from_heading(cx.pose[i][pose::HEADING]);
         let threat = cx.fields.sample(Layer::Threat, pos.x, pos.y);
         let r = unit(roll(cx.seed, cx.tick, stable, Stream::Police));
+        let charging = squad.doctrine == Doctrine::Charge;
         let eager = 0.15
             + anger * 0.6
             + (threat * 0.05).min(0.4)
-            + if squad.doctrine == Doctrine::Disperse {
-                0.3
-            } else {
-                0.0
+            + match squad.doctrine {
+                Doctrine::Disperse => 0.3,
+                Doctrine::Charge => 0.5,
+                _ => 0.0,
             };
+        let arc = if charging { -0.2 } else { 0.3 };
         if r < eager {
             for &j in cx.sp.neighbours(i) {
                 let j = j as usize;
                 // Not someone already on the ground.
-                if is_officer_stat(cx.stat_ro[j]) || cx.stat_ro[j][stat::FLAGS] & flag::DOWN != 0 {
+                let sj = cx.stat_ro[j];
+                if is_officer_stat(sj) || sj[stat::FLAGS] & flag::DOWN != 0 {
                     continue;
                 }
                 let d = Vec2::new(cx.px[j], cx.py[j]) - pos;
-                if d.normalize_or_zero().dot(fwd) > 0.3 {
-                    act = Action::Strike;
+                if d.normalize_or_zero().dot(fwd) > arc {
+                    let known = sj[stat::FLAGS] & flag::KNOWN != 0
+                        && Archetype::from_u8(sj[stat::ARCH]) != Archetype::Provocateur
+                        && !cx.police.arrests.contains(cx.stable[j]);
+                    // A charge grabs the people the police identified; a
+                    // line pulls one in now and then.
+                    let grab = known
+                        && (charging
+                            || unit(roll(cx.seed, cx.tick, stable ^ 0x5a5a, Stream::Police))
+                                < 0.35);
+                    act = if grab { Action::Arrest } else { Action::Strike };
                     target = cx.stable[j];
                     break;
                 }

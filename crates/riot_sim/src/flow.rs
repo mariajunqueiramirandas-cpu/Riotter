@@ -48,11 +48,15 @@ const PAGE_TILES: usize = (REGION * REGION) as usize;
 /// Cost of crossing one open tile (8 m at 20 units per metre).
 const TILE_STEP: u32 = 160;
 /// Buckets in Dial's queue: a power of two, more than the largest tile step
-/// cost (a diagonal step at the largest penalty, 905).
-const DIAL_BUCKETS: usize = 1024;
+/// cost (a diagonal step at the largest penalty, 3620).
+const DIAL_BUCKETS: usize = 4096;
 const _: () = assert!(DIAL_BUCKETS.is_power_of_two());
-/// Largest tile step cost (`TILE_STEP` plus the largest penalty).
-const MAX_STEP: u32 = TILE_STEP * 4;
+const _: () = assert!(MAX_STEP as usize * DIAG_256 as usize / 256 < DIAL_BUCKETS);
+/// Largest tile step cost (`TILE_STEP` plus the largest penalty): crowds,
+/// gas and fire make a tile up to 4× as long, police barriers up to 16×.
+const MAX_STEP: u32 = TILE_STEP * 16;
+/// Largest penalty from crowds, gas and fire (in tenths of a step).
+const MAX_SOFT_PEN: f32 = 24.0;
 /// Most flow tiles built per tick; further requests wait a tick.
 const MAX_JOBS_PER_TICK: usize = 96;
 /// Most corridor recomputes per tick.
@@ -218,7 +222,7 @@ impl FlowSystem {
             page_step: vec![TILE_STEP; pages * PAGE_TILES],
             page_epoch: vec![0; pages * PAGE_TILES],
             page_region: vec![NONE; pages],
-            dial: (0..DIAL_BUCKETS).map(|_| Vec::with_capacity(256)).collect(),
+            dial: (0..DIAL_BUCKETS).map(|_| Vec::with_capacity(128)).collect(),
             page_flow: vec![NONE; pages * PAGE_TILES],
             page_free: (0..pages as u32).rev().collect(),
             meta: vec![meta; flow_tiles],
@@ -355,6 +359,96 @@ impl FlowSystem {
     #[inline]
     pub fn anchor_point(&self, map: &Map, g: u8, a: u32) -> Option<(Vec2, f32)> {
         anchor_at(map, &self.goals[g as usize], a)
+    }
+
+    /// The route someone at `from` takes to goal `g`: the turning points of
+    /// its any-angle path through the goal's corridor, `out[0] = from`, up
+    /// to where it enters the goal's disc. Stops early where the corridor
+    /// does not reach (yet) or when `out` is full. Returns the number of
+    /// points written. Reads only settled tile costs, so it works before
+    /// any flow tile is built.
+    pub fn route(&self, map: &Map, g: u8, from: Vec2, out: &mut [Vec2]) -> usize {
+        if out.is_empty() {
+            return 0;
+        }
+        out[0] = from;
+        let goal = &self.goals[g as usize];
+        if !goal.active {
+            return 1;
+        }
+        let (mut n, mut p, mut cost) = (1, from, INF);
+        while n < out.len() {
+            let Some((cx, cy)) = map.cell_of(p) else {
+                break;
+            };
+            let Some(c) = map.comp_of(cx, cy) else { break };
+            let t = map.tile_index(cx >> 4, cy >> 4);
+            let here = self.tile_cost(map, g, t, c);
+            // Downhill only: never loop.
+            if here == 0 || here == INF || here >= cost {
+                break;
+            }
+            cost = here;
+            let a = self.tile_anchor(map, g, t, c);
+            if a == NONE {
+                break;
+            }
+            let next = match anchor_at(map, goal, a) {
+                Some((q, r)) if a & ANCHOR_TARGET != 0 => {
+                    // Into the goal's disc, and done.
+                    let d = q - p;
+                    let len = d.len();
+                    out[n] = if len > r {
+                        p + d * ((len - r) / len)
+                    } else {
+                        q
+                    };
+                    return n + 1;
+                }
+                Some((q, _)) if a >> 2 != t => q,
+                // A tile with walls heads for itself: step to the cheapest
+                // neighbour instead, at its nearest open spot.
+                _ => {
+                    let (tx, ty) = (t & (map.tdim - 1), t >> map.tshift);
+                    let mut best: Option<(u32, u32)> = None;
+                    for (dx, dy) in TILE_STEPS {
+                        let (nx, ny) = (tx as i32 + dx, ty as i32 + dy);
+                        if nx < 0 || ny < 0 || nx >= map.tdim as i32 || ny >= map.tdim as i32 {
+                            continue;
+                        }
+                        let nt = map.tile_index(nx as u32, ny as u32);
+                        for nc in 0..map.tile_ncomp(nt) {
+                            let k = self.tile_cost(map, g, nt, nc);
+                            if k < here && best.is_none_or(|b| k < b.0) {
+                                best = Some((k, nt));
+                            }
+                        }
+                    }
+                    let Some((_, nt)) = best else { break };
+                    let c = tile_centre(map, nt);
+                    map.nearest_open(c, TILE_M * 0.5).unwrap_or(c)
+                }
+            };
+            if (next - p).len2() < 1e-4 {
+                break;
+            }
+            // Keep turning points only: a step straight on extends the last.
+            let straight = n >= 2 && {
+                let (a, b) = (
+                    (p - out[n - 2]).normalize_or_zero(),
+                    (next - p).normalize_or_zero(),
+                );
+                a.dot(b) > 0.995
+            };
+            if straight {
+                out[n - 1] = next;
+            } else {
+                out[n] = next;
+                n += 1;
+            }
+            p = next;
+        }
+        n
     }
 
     /// Phase 10: swap in finished tiles, take requests, recompute corridors,
@@ -760,7 +854,7 @@ impl FlowSystem {
             for local in 0..PAGE_TILES as u32 {
                 let t = map.tile_index(rx * REGION + local % REGION, ry * REGION + local / REGION);
                 self.page_step[p as usize * PAGE_TILES + local as usize] =
-                    tile_step_cost(map, fields, tun, t);
+                    tile_step_cost(map, fields, tun, t, g < GOAL_POLICE);
             }
         }
         let goal = &self.goals[gi];
@@ -1059,8 +1153,10 @@ fn toward(map: &Map, tx: u32, ty: u32, a: Vec2) -> Option<(i32, i32)> {
     })
 }
 
-/// Cost of entering tile `t`: its length plus crowd, gas and fire penalties.
-fn tile_step_cost(map: &Map, fields: &Fields, tun: &Tunables, t: u32) -> u32 {
+/// Cost of entering tile `t`: its length plus crowd, gas and fire penalties,
+/// and, for everyone but the police (who open their own), police barriers
+/// across it.
+fn tile_step_cost(map: &Map, fields: &Fields, tun: &Tunables, t: u32, barriers: bool) -> u32 {
     let (tx, ty) = (t & (map.tdim - 1), t >> map.tshift);
     let cx = tx as f32 * TILE_M - map.half + TILE_M * 0.5;
     let cy = ty as f32 * TILE_M - map.half + TILE_M * 0.5;
@@ -1068,8 +1164,36 @@ fn tile_step_cost(map: &Map, fields: &Fields, tun: &Tunables, t: u32) -> u32 {
     let gas = fields.sample(Layer::Gas, cx, cy);
     let fire = fields.sample(Layer::Fire, cx, cy);
     let pen = (tun.flow_density_cost * dens + tun.flow_gas_cost * gas + tun.flow_fire_cost * fire)
-        .clamp(0.0, 24.0);
-    TILE_STEP + (TILE_STEP as f32 * pen * 0.1) as u32
+        .clamp(0.0, MAX_SOFT_PEN)
+        + if barriers {
+            tun.flow_block_cost * tile_block(fields, cx, cy)
+        } else {
+            0.0
+        };
+    (TILE_STEP + (TILE_STEP as f32 * pen * 0.1) as u32).min(MAX_STEP)
+}
+
+/// The most blocked of the 4 × 4 field cells of the tile centred on
+/// `(cx, cy)`: a barrier is a thin line, which the centre alone would miss.
+#[inline]
+fn tile_block(fields: &Fields, cx: f32, cy: f32) -> f32 {
+    if !fields.block_live {
+        return 0.0;
+    }
+    let (fx, fy) = fields.geom.to_cell_f(cx - TILE_M * 0.5, cy - TILE_M * 0.5);
+    let (x0, y0) = ((fx + 0.5).floor() as i32, (fy + 0.5).floor() as i32);
+    let cc = crate::fields::CC as i32;
+    match fields.slot_of_chunk(x0.div_euclid(cc), y0.div_euclid(cc)) {
+        Some(s) if fields.blocked[s] => {}
+        _ => return 0.0,
+    }
+    let mut m = 0.0f32;
+    for dy in 0..4 {
+        for dx in 0..4 {
+            m = m.max(fields.cell_value(Layer::Block, x0 + dx, y0 + dy));
+        }
+    }
+    m
 }
 
 /// The components of the orthogonal neighbour at `dx, dy` of tile `t` that
@@ -1216,10 +1340,16 @@ fn build_tile(
             let dens = fields.value_at(Layer::Dens, p);
             let gas = fields.value_at(Layer::Gas, p);
             let fire = fields.value_at(Layer::Fire, p);
+            let block = if fields.block_live && g < GOAL_POLICE {
+                fields.value_at(Layer::Block, p)
+            } else {
+                0.0
+            };
             let pen = (tun.flow_density_cost * dens
                 + tun.flow_gas_cost * gas
                 + tun.flow_fire_cost * fire)
-                .clamp(0.0, 24.0);
+                .clamp(0.0, MAX_SOFT_PEN)
+                + tun.flow_block_cost * block;
             let f = 10.0 + pen * 10.0;
             uniform &= f == 10.0;
             for ly in 0..4 {

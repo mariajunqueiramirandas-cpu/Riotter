@@ -1,11 +1,13 @@
 //! Police (DESIGN §2.5, §14).
 //!
 //! - **Squads** are a small AoS table. Each runs a doctrine state machine:
-//!   hold line, advance, kettle, disperse, snatch arrest, retreat.
+//!   hold line, advance, kettle, disperse, snatch arrest, retreat, put up a
+//!   barricade, wait in ambush, charge, escort a march.
 //! - **The director** replans every `director_interval` ticks. It clusters
-//!   the crowd with union-find over dense cells in the active field chunks,
-//!   climbs (or descends) the escalation ladder within the setup's cap, and
-//!   assigns squads to clusters.
+//!   the crowd with union-find over dense cells in the active field chunks;
+//!   the commander ([`crate::tactics`]) tracks those crowds, predicts their
+//!   routes, climbs (or descends) the escalation ladder within the setup's
+//!   cap, plans an operation for each crowd and gives the squads their jobs.
 //! - **Formations**: a line is slots along a segment; a kettle is slots on a
 //!   contracting circle around a cluster. Officers steer to their slots with
 //!   the shared steering kernel.
@@ -26,27 +28,17 @@ use crate::archetype::Archetype;
 use crate::fields::{CC, CL, Layer, NO_CHUNK};
 use crate::flow::{GOAL_POLICE, MAX_GOALS, NO_GOAL};
 use crate::map::Map;
-use crate::mapdef::EntryKind;
 use crate::people::Spawn;
 use crate::physics::Obb;
 use crate::setup::{Escalation, NotableKind, RiotSetup, SquadKind, minutes};
 use crate::state::{Action, Gait, Item, emo, flag, health, pose, stat};
 use crate::steer::OfficerTarget;
+use crate::tactics::{self, Commander, NO_CORDON, NO_TRACK};
 use crate::world::{NO_SLOT, SetupError, World, appearance_for};
 
 pub const MAX_SQUAD: usize = 16;
 pub const NO_SQUAD: u16 = u16::MAX;
 const MAX_CLUSTERS: usize = 32;
-/// Most squads committed to one cluster.
-const MAX_PICK: usize = 16;
-/// Ticks a squad holds its post after its crowd stops being assigned.
-const STAND_DOWN_TICKS: u32 = 1200;
-/// Crowds smaller than this get squads only when violent.
-const MIN_POLICED: f32 = 150.0;
-/// How far a snatch squad goes into a crowd for someone (m).
-const SNATCH_REACH: f32 = 25.0;
-/// How close to the crowd's front a snatch squad must be to go in (m).
-const SNATCH_STAGING: f32 = 40.0;
 const PATH: usize = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
@@ -63,7 +55,18 @@ pub enum Doctrine {
     Snatch = 6,
     Retreat = 7,
     Reserve = 8,
+    /// Put steel barriers across a street and hold behind them.
+    Barricade = 9,
+    /// Wait out of sight in a side street for the crowd to come.
+    Ambush = 10,
+    /// Run at the crowd, batons out: a sprung ambush cutting a crowd in two,
+    /// then sweeping the rear part back the way it came.
+    Charge = 11,
+    /// Walk alongside a march.
+    Escort = 12,
 }
+
+pub const DOCTRINES: usize = 13;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Squad {
@@ -96,6 +99,20 @@ pub struct Squad {
     pub cluster_at: Vec2,
     /// Tick this squad was last given a crowd.
     pub assigned: u32,
+    /// Persistent id of the crowd this squad works ([`crate::tactics::Track`]),
+    /// or `NO_TRACK`.
+    pub track: u32,
+    /// Cordon this squad builds, holds or lies in ambush for, or `NO_CORDON`.
+    pub cordon: u8,
+    /// Tick the current doctrine began.
+    pub since: u32,
+    /// Mean fatigue of the officers present.
+    pub fatigue: f32,
+    /// Where a charge cuts in, or which way a kettle's gate opens (zero
+    /// when shut).
+    pub sweep: Vec2,
+    /// Half its officers have fled their posts.
+    pub broken: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -112,6 +129,9 @@ pub struct Cluster {
     pub anger: f32,
     pub threat: f32,
     pub cells: u32,
+    /// Bounding box of its cells.
+    pub lo: Vec2,
+    pub hi: Vec2,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -178,9 +198,8 @@ pub struct Police {
     pub watch: SparseSet<u8>,
     pub goal_pos: [Vec2; MAX_GOALS],
     pub goal_used: [u32; MAX_GOALS],
-    pub gas_ready: u32,
     pub aggression: f32,
-    forced: Option<Escalation>,
+    pub(crate) forced: Option<Escalation>,
     label: Vec<u32>,
     cells: Vec<(u32, u32, u32)>,
     parent: Vec<u32>,
@@ -188,7 +207,8 @@ pub struct Police {
     road_prev: Vec<u32>,
     road_heap: BinaryHeap<Reverse<(u32, u32)>>,
     pub closed_metro: bool,
-    pub kettle_closed: [bool; MAX_CLUSTERS],
+    /// The strategic layer: crowds, cordons, ambushes, what it has learnt.
+    pub cmd: Commander,
 }
 
 impl Police {
@@ -254,6 +274,12 @@ impl Police {
                 ring: (0, 1),
                 cluster_at: Vec2::new(f32::MAX, f32::MAX),
                 assigned: 0,
+                track: NO_TRACK,
+                cordon: NO_CORDON,
+                since: 0,
+                fatigue: 0.0,
+                sweep: Vec2::ZERO,
+                broken: false,
             });
         }
         let mut vehicles = Vec::new();
@@ -313,7 +339,6 @@ impl Police {
             watch: SparseSet::new(max_people.max(1), 4096),
             goal_pos: [Vec2::ZERO; MAX_GOALS],
             goal_used: [0; MAX_GOALS],
-            gas_ready: 0,
             aggression: setup.police.aggression.clamp(0.0, 1.0),
             forced: None,
             label: vec![u32::MAX; pool * CL],
@@ -323,7 +348,7 @@ impl Police {
             road_prev: vec![u32::MAX; nodes],
             road_heap: BinaryHeap::with_capacity(nodes * 4 + 16),
             closed_metro: false,
-            kettle_closed: [false; MAX_CLUSTERS],
+            cmd: Commander::new(map),
         })
     }
 
@@ -364,7 +389,9 @@ impl Police {
             h.write_f32(s.radius);
             h.write_f32(s.morale);
             h.write_u32(s.target_person);
+            h.write_u32(s.track ^ (s.cordon as u32) << 24);
         }
+        self.cmd.hash_into(h);
         for v in &self.vehicles {
             h.write_f32(v.pos.x);
             h.write_f32(v.pos.y);
@@ -483,11 +510,16 @@ pub fn director(w: &mut World) {
     let every = w.tun.director_interval.max(1.0) as u32;
     if tick.is_multiple_of(every) {
         clusters(w);
-        escalate(w);
-        assign(w);
+        tactics::observe(w);
+        tactics::escalate(w);
+        tactics::plan(w);
+        tactics::assign(w);
+        route_squads(w);
         surveil(w);
-        use_force(w);
+        tactics::use_force(w);
+        tactics::restamp(w);
     }
+    tactics::tick(w);
     update_squads(w);
     arrests(w);
     vehicles(w);
@@ -505,11 +537,16 @@ fn dispatch(w: &mut World, s: usize) {
             && v.squad == NO_SQUAD
             && v.state == VehicleState::Parked
     });
-    let dest = w
-        .police
-        .clusters
-        .first()
-        .map(|c| c.centroid)
+    // Where the trouble is: a cordon still short of squads, else the
+    // biggest crowd.
+    let squads = &w.police.squads;
+    let cordon =
+        w.police.cmd.cordons.iter().enumerate().find(|&(ci, c)| {
+            c.live() && !squads.iter().any(|q| q.deployed && q.cordon == ci as u8)
+        });
+    let dest = cordon
+        .map(|(_, c)| c.line())
+        .or_else(|| w.police.clusters.first().map(|c| c.centroid))
         .unwrap_or(w.police.squads[s].home);
     match van {
         Some(v) if plan_route(w, v, dest) => {
@@ -522,7 +559,7 @@ fn dispatch(w: &mut World, s: usize) {
 }
 
 /// Road Dijkstra from the vehicle's position to the node nearest `dest`.
-fn plan_route(w: &mut World, v: usize, dest: Vec2) -> bool {
+pub(crate) fn plan_route(w: &mut World, v: usize, dest: Vec2) -> bool {
     let roads = &w.map.roads;
     let (Some(a), Some(b)) = (roads.nearest(w.police.vehicles[v].pos), roads.nearest(dest)) else {
         return false;
@@ -645,8 +682,32 @@ fn clusters(w: &mut World) {
         }
     }
     // Accumulate per root, roots in index order.
-    let mut acc: [(u32, f64, f64, f64, f64, f64, u32, f64); MAX_CLUSTERS * 4] =
-        [(u32::MAX, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0.0); MAX_CLUSTERS * 4];
+    #[derive(Clone, Copy)]
+    struct Acc {
+        root: u32,
+        dens: f64,
+        x: f64,
+        y: f64,
+        anger: f64,
+        threat: f64,
+        cells: u32,
+        weight: f64,
+        lo: Vec2,
+        hi: Vec2,
+    }
+    let mut acc = [Acc {
+        root: u32::MAX,
+        dens: 0.0,
+        x: 0.0,
+        y: 0.0,
+        anger: 0.0,
+        threat: 0.0,
+        cells: 0,
+        weight: 0.0,
+        lo: Vec2::new(f32::MAX, f32::MAX),
+        hi: Vec2::new(f32::MIN, f32::MIN),
+    }; MAX_CLUSTERS * 4];
+    let empty = acc[0];
     let mut nacc = 0usize;
     for k in 0..p.cells.len() {
         let root = find(&mut p.parent, k as u32);
@@ -658,246 +719,63 @@ fn clusters(w: &mut World) {
             cy * CC as u32 + cell / CC as u32,
         );
         let (x, y) = f.geom.centre(gx, gy);
-        let e = match acc[..nacc].iter().position(|a| a.0 == root) {
+        let e = match acc[..nacc].iter().position(|a| a.root == root) {
             Some(e) => e,
             None if nacc < acc.len() => {
-                acc[nacc] = (root, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0.0);
+                acc[nacc] = Acc { root, ..empty };
                 nacc += 1;
                 nacc - 1
             }
             None => continue,
         };
         let a = &mut acc[e];
-        a.1 += d;
-        a.2 += x as f64 * d;
-        a.3 += y as f64 * d;
-        a.4 += f.layer(slot as usize, Layer::Anger)[cell as usize] as f64;
-        a.7 += f.layer(slot as usize, Layer::Weight)[cell as usize] as f64;
-        a.5 += f.layer(slot as usize, Layer::Threat)[cell as usize] as f64;
-        a.6 += 1;
+        a.dens += d;
+        a.x += x as f64 * d;
+        a.y += y as f64 * d;
+        a.anger += f.layer(slot as usize, Layer::Anger)[cell as usize] as f64;
+        a.weight += f.layer(slot as usize, Layer::Weight)[cell as usize] as f64;
+        a.threat += f.layer(slot as usize, Layer::Threat)[cell as usize] as f64;
+        a.cells += 1;
+        a.lo = Vec2::new(a.lo.x.min(x), a.lo.y.min(y));
+        a.hi = Vec2::new(a.hi.x.max(x), a.hi.y.max(y));
     }
     p.clusters.clear();
     let mut order: [usize; MAX_CLUSTERS * 4] = [0; MAX_CLUSTERS * 4];
     for (k, o) in order.iter_mut().enumerate().take(nacc) {
         *o = k;
     }
-    order[..nacc].sort_unstable_by(|&a, &b| acc[b].1.total_cmp(&acc[a].1).then(a.cmp(&b)));
+    order[..nacc].sort_unstable_by(|&a, &b| acc[b].dens.total_cmp(&acc[a].dens).then(a.cmp(&b)));
     for &k in order[..nacc].iter() {
         let a = acc[k];
-        if a.1 < 40.0 || p.clusters.len() == MAX_CLUSTERS {
+        if a.dens < 40.0 || p.clusters.len() == MAX_CLUSTERS {
             continue;
         }
-        let area = a.6 as f32 * 4.0;
+        let area = a.cells as f32 * 4.0;
         p.clusters.push(Cluster {
-            centroid: Vec2::new((a.2 / a.1) as f32, (a.3 / a.1) as f32),
-            count: a.1 as f32,
+            centroid: Vec2::new((a.x / a.dens) as f32, (a.y / a.dens) as f32),
+            count: a.dens as f32,
             radius: (area / core::f32::consts::PI).sqrt(),
-            anger: (a.4 / a.7.max(1e-3)) as f32,
-            threat: a.5 as f32,
-            cells: a.6,
+            anger: (a.anger / a.weight.max(1e-3)) as f32,
+            threat: a.threat as f32,
+            cells: a.cells,
+            lo: a.lo,
+            hi: a.hi,
         });
     }
 }
 
-/// Climb the ladder in response to violence; step down after calm.
-fn escalate(w: &mut World) {
-    let p = &mut w.police;
-    if let Some(f) = p.forced {
-        p.escalation = f;
-        return;
-    }
-    let need = w.tun.escalate_threat * (1.25 - 0.5 * p.aggression);
-    let angry = p.clusters.iter().any(|c| c.anger > 0.55 && c.count > 300.0);
-    let every = w.tun.director_interval.max(1.0) as u32;
-    if (p.violence > need || angry && p.escalation < Escalation::LinesAndKettles)
-        && p.escalation < p.cap
-    {
-        p.escalation = Escalation::from_u8(p.escalation as u8 + 1);
-        p.violence *= 0.5;
-        p.calm_ticks = 0;
-        if p.escalation > p.max_reached {
-            p.max_reached = p.escalation;
-            w.outcome.notable(
-                w.tick,
-                NotableKind::EscalationRaised,
-                Vec2::ZERO,
-                p.escalation as u32,
-            );
-        }
-    } else if p.violence < need * 0.1 {
-        p.calm_ticks += every;
-        if p.calm_ticks as f32 > w.tun.deescalate_ticks && p.escalation > Escalation::Presence {
-            p.escalation = Escalation::from_u8(p.escalation as u8 - 1);
-            p.calm_ticks = 0;
-        }
-    } else {
-        p.calm_ticks = 0;
-    }
-    p.violence *= 0.9;
-}
-
-/// Assign squads to clusters with a doctrine that fits the rung.
-fn assign(w: &mut World) {
-    let rung = w.police.escalation;
-    let nclusters = w.police.clusters.len();
-    let mut taken = [false; 256];
-    // Snatch targets handed out this pass: one squad per person.
-    let mut targets = [u32::MAX; 256];
-    let mut nt = 0;
-    // Protected point: the government quarter, else the squads' home.
-    let protect = w
-        .map
-        .areas
-        .iter()
-        .find(|a| a.tag == "government")
-        .map(|a| a.pos);
-    for k in 0..w.police.squads.len().min(256) {
-        let sq = &w.police.squads[k];
-        if !sq.deployed || sq.present == 0 {
-            taken[k] = true;
-        }
-        if sq.morale < 0.3 {
-            let sq = &mut w.police.squads[k];
-            sq.doctrine = Doctrine::Retreat;
-            sq.anchor = sq.home;
-            taken[k] = true;
-        }
-    }
-    for ci in 0..nclusters {
-        let c = w.police.clusters[ci];
-        let violent = c.threat > 6.0 || w.police.violence > 4.0;
-        if c.count < MIN_POLICED && c.threat <= 6.0 {
-            continue;
-        }
-        // A kettle once begun is finished, not dropped when the trouble that
-        // started it fades.
-        let kettled = w.police.squads.iter().any(|sq| {
-            sq.doctrine == Doctrine::Kettle && (sq.cluster_at - c.centroid).len() < c.radius + 30.0
-        });
-        let ring_it =
-            rung >= Escalation::LinesAndKettles && (violent || kettled) && c.count < 1500.0;
-        // Enough squads for the crowd, and to ring it if it may be kettled:
-        // officers at most 1.4 m apart around its packed radius.
-        let mut want = (c.count / 350.0).ceil() as usize;
-        if ring_it {
-            let packed_r = (c.count / (2.5 * core::f32::consts::PI)).sqrt().max(4.0);
-            want = want.max((2.0 * core::f32::consts::PI * packed_r / 1.4 / 10.0).ceil() as usize);
-        }
-        let want = want.clamp(1, MAX_PICK);
-        // Nearest free squads, preferring the right kinds.
-        let mut picked = [usize::MAX; MAX_PICK];
-        let mut np = 0;
-        for _ in 0..want {
-            let mut best: Option<(f32, usize)> = None;
-            for (k, sq) in w.police.squads.iter().enumerate().take(256) {
-                if taken[k] {
-                    continue;
-                }
-                let mut d = (sq.pos - c.centroid).len();
-                if (sq.cluster_at - c.centroid).len() < c.radius + 30.0 {
-                    d *= 0.2;
-                }
-                if sq.kind == SquadKind::Snatch && rung < Escalation::BatonsAndArrests {
-                    d += 5000.0;
-                }
-                if best.is_none_or(|b| d < b.0) {
-                    best = Some((d, k));
-                }
-            }
-            let Some((_, k)) = best else { break };
-            taken[k] = true;
-            picked[np] = k;
-            np += 1;
-        }
-        let kettle = ring_it && np >= 2 || rung >= Escalation::MassArrests;
-        let n_ring = picked[..np]
-            .iter()
-            .filter(|&&k| w.police.squads[k].kind != SquadKind::Snatch)
-            .count()
-            .max(1) as u8;
-        let mut ring_i = 0u8;
-        let away = match protect {
-            Some(g) => (g - c.centroid).normalize_or_zero(),
-            None => Vec2::new(1.0, 0.0),
-        };
-        let away = if away == Vec2::ZERO {
-            Vec2::new(1.0, 0.0)
-        } else {
-            away
-        };
-        // The crowd's front, facing what the police protect.
-        let front = c.centroid + away * c.radius;
-        for (j, &k) in picked[..np].iter().enumerate() {
-            // Snatch squads move up behind the line before they go in.
-            let near_front = (w.police.squads[k].pos - front).len() < SNATCH_STAGING;
-            let target = if w.police.squads[k].kind == SquadKind::Snatch && near_front {
-                pick_snatch_target(w, c, w.police.squads[k].pos, &targets[..nt])
-            } else {
-                u32::MAX
-            };
-            if target != u32::MAX && nt < targets.len() {
-                targets[nt] = target;
-                nt += 1;
-            }
-            let sq = &mut w.police.squads[k];
-            sq.cluster = ci as u16;
-            sq.cluster_at = c.centroid;
-            sq.assigned = w.tick;
-            let side = away.perp() * ((j as f32 - (np as f32 - 1.0) * 0.5) * (sq.width + 2.0));
-            let line_anchor = c.centroid + away * (c.radius + 10.0) + side;
-            let doctrine = match sq.kind {
-                SquadKind::Snatch if rung >= Escalation::BatonsAndArrests && target != u32::MAX => {
-                    Doctrine::Snatch
-                }
-                _ if kettle => Doctrine::Kettle,
-                SquadKind::Riot if rung >= Escalation::GasAndWater && violent => Doctrine::Disperse,
-                SquadKind::Riot if rung >= Escalation::BatonsAndArrests && violent => {
-                    Doctrine::Advance
-                }
-                _ => Doctrine::HoldLine,
-            };
-            if doctrine == Doctrine::Kettle {
-                if sq.doctrine != Doctrine::Kettle || sq.cluster != ci as u16 {
-                    sq.radius = c.radius + 6.0;
-                }
-                sq.anchor = c.centroid;
-                sq.ring = (ring_i, n_ring);
-                ring_i += 1;
-            } else if doctrine == Doctrine::Snatch {
-                sq.target_person = target;
-            } else if sq.doctrine != doctrine || (sq.anchor - line_anchor).len() > 30.0 {
-                sq.anchor = line_anchor;
-            }
-            sq.facing = -away;
-            sq.doctrine = doctrine;
-        }
-    }
-    for k in 0..w.police.squads.len().min(256) {
-        if !taken[k] {
-            let tick = w.tick;
-            let sq = &mut w.police.squads[k];
-            sq.cluster = u16::MAX;
-            // A crowd that drops out of one replan is usually still there:
-            // hold the post a while before standing down.
-            let recent = sq.cluster_at.x != f32::MAX
-                && tick.saturating_sub(sq.assigned) < STAND_DOWN_TICKS
-                && sq.doctrine != Doctrine::Reserve;
-            if recent {
-                if sq.doctrine == Doctrine::Snatch || sq.doctrine == Doctrine::Kettle {
-                    sq.doctrine = Doctrine::HoldLine;
-                    sq.anchor = sq.pos;
-                }
-            } else {
-                sq.doctrine = Doctrine::Reserve;
-                sq.anchor = sq.home;
-            }
-        }
-    }
-    // Route squads far from their anchor through police flow goals.
+/// Route squads far from their anchor through police flow goals, and
+/// squads with an officer who cannot see it (round a corner).
+fn route_squads(w: &mut World) {
     for k in 0..w.police.squads.len() {
         let sq = w.police.squads[k];
+        let in_sight =
+            |p: Vec2| (p - sq.anchor).len() < 25.0 && w.map.ray_blocked(p, sq.anchor).is_none();
         if !sq.deployed
-            || (sq.pos - sq.anchor).len() < 25.0 && w.map.ray_blocked(sq.pos, sq.anchor).is_none()
+            || in_sight(sq.pos)
+                && sq.officers[..sq.n as usize]
+                    .iter()
+                    .all(|&o| w.index_of(o).is_none_or(|i| in_sight(w.people.pos(i))))
         {
             w.police.squads[k].goal = NO_GOAL;
             continue;
@@ -928,48 +806,6 @@ fn police_goal(w: &mut World, p: Vec2) -> u8 {
     g
 }
 
-/// Organizers identified by surveillance first, then filmed violent people.
-/// Someone for the snatch squad at `from` to arrest: a known organizer, else
-/// someone filmed starting violence, nearest the squad and close enough to
-/// reach through the edge of the crowd. Never a target another squad has.
-fn pick_snatch_target(w: &World, c: Cluster, from: Vec2, taken: &[u32]) -> u32 {
-    let reach = c.radius + 40.0;
-    let eligible = |s: u32, best: &mut Option<(f32, u32)>| {
-        let Some(i) = w.index_of(s) else { return };
-        if w.police.arrests.contains(s)
-            || taken.contains(&s)
-            || Gait::from_u8(w.people.pose[i][pose::GAIT]) == Gait::Restrained
-            || (w.people.pos(i) - c.centroid).len() > reach
-        {
-            return;
-        }
-        let d = (w.people.pos(i) - from).len();
-        if d < SNATCH_REACH && best.is_none_or(|b| d < b.0) {
-            *best = Some((d, s));
-        }
-    };
-    let mut best: Option<(f32, u32)> = None;
-    for &s in &w.police.organizers {
-        if w.index_of(s)
-            .is_some_and(|i| w.people.flags(i) & flag::KNOWN != 0)
-        {
-            eligible(s, &mut best);
-        }
-    }
-    if let Some((_, s)) = best {
-        return s;
-    }
-    for &(s, _) in w.police.watch.entries() {
-        // The state does not arrest its own.
-        if w.index_of(s).is_some_and(|i| {
-            Archetype::from_u8(w.people.stat[i][stat::ARCH]) != Archetype::Provocateur
-        }) {
-            eligible(s, &mut best);
-        }
-    }
-    best.map_or(u32::MAX, |b| b.1)
-}
-
 /// Officers recognise organizers near them; footage identifies people.
 fn surveil(w: &mut World) {
     for k in 0..w.police.organizers.len() {
@@ -990,98 +826,23 @@ fn surveil(w: &mut World) {
     }
 }
 
-/// Gas and water cannons at the top rungs; metro closures.
-fn use_force(w: &mut World) {
-    let rung = w.police.escalation;
-    if rung < Escalation::GasAndWater {
-        return;
-    }
-    let tick = w.tick;
-    for ci in 0..w.police.clusters.len().min(4) {
-        let c = w.police.clusters[ci];
-        let violent = c.threat > 4.0 || w.police.violence > 3.0;
-        if !violent {
-            continue;
-        }
-        // Tear gas from the nearest riot officer.
-        if tick >= w.police.gas_ready {
-            let mut thrower: Option<(f32, u32)> = None;
-            for &o in &w.police.on_map {
-                let Some(i) = w.index_of(o) else { continue };
-                if w.people.stat[i][stat::ARCH] != Archetype::RiotOfficer as u8 {
-                    continue;
-                }
-                let d = (w.people.pos(i) - c.centroid).len();
-                if d < 60.0 && thrower.is_none_or(|t| d < t.0) {
-                    thrower = Some((d, o));
-                }
-            }
-            if let Some((_, o)) = thrower {
-                let i = w.index_of(o).unwrap();
-                let from = w.people.pos(i);
-                let jitter = Vec2::from_heading(roll(w.seed, tick, o, Stream::Police) as u8)
-                    * (c.radius * 0.4);
-                let to = c.centroid + jitter;
-                w.hazards
-                    .throw_canister(from, to, o, w.tun.throw_speed * 1.3);
-                w.outcome.police_act(tick, from, to, &w.fields, 1.0, o);
-                if !w.outcome.first_gas {
-                    w.outcome.first_gas = true;
-                    w.outcome.notable(tick, NotableKind::FirstGas, to, o);
-                }
-                w.police.gas_ready = tick + 200;
-            }
-        }
-        // Water cannon trucks drive to the cluster's edge.
-        for v in 0..w.police.vehicles.len() {
-            let veh = w.police.vehicles[v];
-            if veh.kind != VehicleKind::WaterCannon || veh.state != VehicleState::Parked {
-                continue;
-            }
-            if (veh.pos - c.centroid).len() > c.radius + w.tun.water_range {
-                let dest =
-                    c.centroid + (veh.pos - c.centroid).normalize_or_zero() * (c.radius + 12.0);
-                plan_route(w, v, dest);
-            } else {
-                w.police.vehicles[v].state = VehicleState::Spraying;
-                w.police.vehicles[v].spray = c.centroid;
-                if !w.outcome.first_water {
-                    w.outcome.first_water = true;
-                    w.outcome
-                        .notable(tick, NotableKind::FirstWaterCannon, veh.pos, u32::MAX);
-                }
-            }
-        }
-    }
-    // Close metro stations near big clusters.
-    if !w.police.closed_metro && w.police.clusters.iter().any(|c| c.count > 800.0) {
-        w.police.closed_metro = true;
-        for k in 0..w.map.entries.len() {
-            if w.map.entries[k].kind == EntryKind::Metro {
-                w.entry_closed[k] = true;
-            }
-        }
-        w.retarget_exits();
-        w.outcome
-            .notable(tick, NotableKind::MetroClosed, Vec2::ZERO, u32::MAX);
-    }
-}
-
 /// Formation slots → officer steering targets; squad morale and position.
 fn update_squads(w: &mut World) {
     let tick = w.tick;
     let shrink = w.tun.kettle_shrink;
+    let charge_ticks = w.tun.charge_ticks.max(1.0) as u32;
     for k in 0..w.police.squads.len() {
         let sq = w.police.squads[k];
         if !sq.deployed {
             continue;
         }
-        // Position, presence and morale from the officers.
-        let (mut sum, mut n, mut fear) = (Vec2::ZERO, 0u32, 0.0f32);
+        // Position, presence, morale and fatigue from the officers.
+        let (mut sum, mut n, mut fear, mut tired) = (Vec2::ZERO, 0u32, 0.0f32, 0.0f32);
         for &o in &sq.officers[..sq.n as usize] {
             if let Some(i) = w.index_of(o) {
                 sum += w.people.pos(i);
                 fear += widen_u8(w.people.emo[i][emo::FEAR]);
+                tired += widen_u8(w.people.emo[i][emo::FATIGUE]);
                 n += 1;
             }
         }
@@ -1091,6 +852,7 @@ fn update_squads(w: &mut World) {
             continue;
         }
         squad.pos = sum * (1.0 / n as f32);
+        squad.fatigue = tired / n as f32;
         let fear = fear / n as f32;
         squad.morale += 0.002 * ((1.0 - fear) * (n as f32 / squad.n as f32) - squad.morale);
         // Doctrine motion.
@@ -1140,9 +902,57 @@ fn update_squads(w: &mut World) {
                     }
                 }
             }
+            Doctrine::Barricade => {
+                if let Some(c) = w.police.cmd.cordons.get(squad.cordon as usize) {
+                    squad.anchor = c.line();
+                    squad.facing = c.face;
+                    squad.width = (2.0 * c.half - 0.6).max(1.0);
+                }
+            }
+            Doctrine::Charge => {
+                // Run in across the street, then sweep the rear of the crowd
+                // back down the route at a walk, then hold.
+                let age = tick.wrapping_sub(squad.since);
+                let arrived = (squad.pos - squad.anchor).len() < 5.0 || age > charge_ticks / 3;
+                if arrived && age <= charge_ticks {
+                    if (squad.pos - squad.anchor).len() < 4.0 {
+                        squad.anchor += squad.sweep * (1.1 * crate::setup::DT);
+                    }
+                } else if age > charge_ticks {
+                    squad.doctrine = Doctrine::HoldLine;
+                    squad.since = tick;
+                    squad.anchor = squad.pos;
+                    squad.cordon = NO_CORDON;
+                }
+                squad.facing = squad.sweep;
+            }
             _ => {}
         }
         let sq = w.police.squads[k];
+        if tick.is_multiple_of(10) {
+            let lined = matches!(
+                sq.doctrine,
+                Doctrine::HoldLine | Doctrine::Barricade | Doctrine::Kettle | Doctrine::Advance
+            );
+            let (fled, of) = tactics::fled(w, &sq.officers[..sq.n as usize]);
+            if lined && !sq.broken && of >= 4 && fled * 2 >= of {
+                w.police.squads[k].broken = true;
+                w.police.cmd.memory.lines_broken += 1;
+                w.police
+                    .cmd
+                    .call(tick, tactics::Call::LineBroken, sq.pos, k as u32);
+                w.outcome
+                    .notable(tick, NotableKind::LineBroken, sq.pos, u32::MAX);
+            } else if sq.broken && fled * 4 < of.max(1) {
+                w.police.squads[k].broken = false;
+            }
+        }
+        let building = sq.doctrine == Doctrine::Barricade
+            && w.police
+                .cmd
+                .cordons
+                .get(sq.cordon as usize)
+                .is_some_and(|c| c.live());
         // Slots.
         let count = sq.n as usize;
         for (slot, &o) in sq.officers[..count].iter().enumerate() {
@@ -1159,7 +969,10 @@ fn update_squads(w: &mut World) {
                 | Doctrine::Advance
                 | Doctrine::Disperse
                 | Doctrine::Reserve
-                | Doctrine::Retreat => {
+                | Doctrine::Retreat
+                | Doctrine::Barricade
+                | Doctrine::Escort
+                | Doctrine::Charge => {
                     let side = sq.facing.perp();
                     let off = (slot as f32 - (count as f32 - 1.0) * 0.5)
                         * (sq.width / count.max(1) as f32);
@@ -1170,12 +983,53 @@ fn update_squads(w: &mut World) {
                             sq.anchor + side * (((slot % 4) as f32 - 1.5) * 1.0) - sq.facing * row;
                         t.run = sq.doctrine == Doctrine::Retreat;
                     }
+                    // A charge runs; squads off to a barricade jog there.
+                    if sq.doctrine == Doctrine::Charge
+                        || sq.doctrine == Doctrine::Barricade && (me - t.pos).len() > 25.0
+                    {
+                        t.run = true;
+                    }
+                    // Far behind a moving march: catch up.
+                    if sq.doctrine == Doctrine::Escort {
+                        t.run = (me - t.pos).len() > 12.0;
+                    }
+                    if building {
+                        let c = w.police.cmd.cordons[sq.cordon as usize];
+                        // An officer whose barrier is down sets it up; the
+                        // rest hold the line across the street.
+                        let mut post = None;
+                        for b in (slot..c.slots as usize).step_by(count.max(1)) {
+                            let k = c.props[b];
+                            let down = k == u16::MAX
+                                || w.props[k as usize].flags & crate::world::prop_flag::DESTROYED
+                                    != 0;
+                            if down {
+                                post = Some(c.slot_post(b));
+                                break;
+                            }
+                        }
+                        if let Some(p) = post {
+                            t.pos = p;
+                            t.face = p + c.face * 10.0;
+                            t.run = (me - p).len() > 6.0;
+                        }
+                    }
+                }
+                Doctrine::Ambush => {
+                    // A tight block out of sight, facing the corner; they jog
+                    // there.
+                    let side = sq.facing.perp();
+                    let row = (slot / 4) as f32;
+                    t.pos = sq.anchor + side * (((slot % 4) as f32 - 1.5) * 0.8)
+                        - sq.facing * row * 0.8;
+                    t.run = (me - t.pos).len() > 20.0;
                 }
                 Doctrine::Kettle => {
                     let (ri, rn) = sq.ring;
                     let total = rn.max(1) as f32 * count as f32;
                     let m = ri as f32 * count as f32 + slot as f32;
                     let h = ((m / total) * 256.0) as u32 as u8;
+                    let h = tactics::kettle_heading(h, sq.sweep);
                     t.pos = sq.anchor + Vec2::from_heading(h) * sq.radius;
                     t.face = sq.anchor;
                     // Run to close the ring; walk once in place.
@@ -1191,6 +1045,17 @@ fn update_squads(w: &mut World) {
                     }
                 }
                 Doctrine::Idle | Doctrine::Travel => {}
+            }
+            // Going for someone: the person, not the slot.
+            if let Some(q) = tactics::grab_target(w, i)
+                && sq.doctrine != Doctrine::Snatch
+            {
+                t.pos = q;
+                t.face = q;
+                t.run = true;
+                if (me - q).len() < 25.0 {
+                    t.goal = NO_GOAL;
+                }
             }
             if let Some(&target) = w.police.escorting.get(o) {
                 // Walk the arrestee to the squad's van, or home.
@@ -1211,32 +1076,6 @@ fn update_squads(w: &mut World) {
                 }
             }
             w.officer_targets[o as usize] = t;
-        }
-        let _ = tick;
-    }
-    // Kettle closure notable.
-    for ci in 0..w.police.clusters.len() {
-        if w.police.kettle_closed[ci] {
-            continue;
-        }
-        let ring: Vec2 = w.police.clusters[ci].centroid;
-        let mut gaps_ok = true;
-        let mut any = false;
-        for sq in &w.police.squads {
-            if sq.doctrine != Doctrine::Kettle || sq.cluster != ci as u16 {
-                continue;
-            }
-            any = true;
-            let circ = 2.0 * core::f32::consts::PI * sq.radius;
-            let total = sq.ring.1.max(1) as f32 * sq.n as f32;
-            if circ / total > 1.6 || (sq.pos - ring).len() > sq.radius + 3.0 {
-                gaps_ok = false;
-            }
-        }
-        if any && gaps_ok {
-            w.police.kettle_closed[ci] = true;
-            w.outcome
-                .notable(w.tick, NotableKind::KettleClosed, ring, u32::MAX);
         }
     }
 }
@@ -1362,7 +1201,7 @@ fn vehicles(w: &mut World) {
                 let crowd = w.fields.sample(Layer::Dens, ahead.x, ahead.y);
                 let blocked = w.obst.near(ahead).any(|o| {
                     let ob = w.obbs.get(o as usize);
-                    ob.is_some_and(|ob| ob.kind == 0 && ob.contains(ahead))
+                    ob.is_some_and(|ob| ob.kind != 1 && ob.contains(ahead))
                 });
                 let speed = if blocked {
                     0.0
@@ -1425,10 +1264,13 @@ fn spray(w: &mut World, v: usize) {
         return;
     }
     let range = w.tun.water_range;
-    let dir = (veh.spray - veh.pos).normalize_or_zero();
-    if dir == Vec2::ZERO {
+    let aim = veh.spray - veh.pos;
+    if aim.len2() < 1e-6 {
         return;
     }
+    // The jet sweeps from side to side across the target.
+    let h = aim.heading() as i32 + tactics::spray_sweep(w.tick);
+    let dir = Vec2::from_heading(h as u8);
     let force = w.tun.water_force;
     let nozzle = veh.pos + dir * veh.half.x;
     let tick = w.tick;

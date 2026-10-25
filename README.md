@@ -3,8 +3,11 @@
 A real-time riot simulation: thousands of autonomous people and a police
 force on a city map of up to 8 × 8 km. You never command anyone. You
 influence the crowd through organizers, objectives, stances, chants and
-supply drops, and every person decides what to do with that. The full design
-is in [DESIGN.md](DESIGN.md).
+supply drops, and every person decides what to do with that. The police
+think for themselves: they read where each crowd is going, barricade its
+route before it gets there, hide squads around corners to charge its flank,
+kettle, warn, gas and arrest, and learn from what worked. The full design is
+in [DESIGN.md](DESIGN.md).
 
 ![A march at street level](docs/screenshots/close.png)
 
@@ -24,10 +27,11 @@ cargo app --scenario data/scenarios/standard_riot.ron
 # Or a generated district: --people, --squads, --size, --seed.
 cargo app --people 5000 --squads 10
 
-# Headless: progress, per-phase benchmark, auto-resolve.
+# Headless: progress, per-phase benchmark, auto-resolve, the police's view.
 cargo headless run --scenario data/scenarios/small_protest.ron
 cargo headless bench --scenario data/scenarios/standard_riot.ron --warmup 4800
 cargo headless resolve --scenario data/scenarios/standard_riot.ron
+cargo headless police --scenario data/scenarios/standard_riot.ron --every 1200
 ```
 
 `cargo app` and `cargo headless` are aliases for
@@ -51,10 +55,17 @@ crowd interprets; none of it is an order.
 | T | cycle the stance attached to messages: peaceful, defensive, confrontational |
 | R, B, C | select the nearest organizer, have them broadcast the plan, chant |
 | Q, E | choose a supply (water, medic, shields, barricade material), drop it |
-| O, L, V, Tab, P | overlay (density, fear, anger, threat, gas, messages, cameras, pressure), level of detail, roofs, markers, phase timings |
+| O, L, V, Tab, P | overlay (density, fear, anger, threat, gas, messages, cameras, pressure), level of detail, roofs, markers and the police plan, phase timings |
 | K, J, N | pixel art on/off, pixel size 1×/2×, time-of-day light |
 | G, F, U, Y, PageUp | debug: gas, fire, spawn people, stamp threat, raise escalation |
 | F1, Esc | help, quit |
+
+The HUD's **police radio** (top right) reports what the police commander
+does as it does it: cordons ordered and barricades up, breaches, ambushes set
+and sprung, kettles, dispersal orders, gas volleys, relieved and broken lines.
+With markers on (Tab), each crowd the police track shows its predicted route
+and the operation against it, barricades show as ordered, up or breached, and
+squads waiting in ambush as red diamonds around their corners.
 
 `--tunables data/tunables.ron` reloads the tunables file while the game runs.
 `--pixel 2` doubles the size of the pixels; `--pixel 0` draws without pixel art.
@@ -117,6 +128,40 @@ one above it.
   the time of day, and at night pools of light from street lamps, fires,
   molotovs and police light bars.
 
+## The police
+
+![A barricade across the march's route, breached; an ambush charges out of a side street](docs/screenshots/police.png)
+
+The police director clusters the crowd every second; above it a commander
+(`riot_sim::tactics`, DESIGN §14.1) works out what to do about each crowd:
+
+- **It reads the crowd.** Crowds are tracked from one replan to the next.
+  Where one is going comes from the plan its people follow; how it will get
+  there comes from its own flow-field corridor, so the police predict the
+  exact route, street by street.
+- **It barricades the route.** A crowd heading for the government quarter is
+  met at the narrowest street on its route that a squad can reach first. The
+  officers set steel barriers across it, wall to wall, and hold behind them.
+  Routes price police barriers almost like walls, so the crowd looks for
+  another way round, and the commander cordons that street too. Crowds push
+  barriers over, faster when angry and slower when officers brace them; a
+  breach sends the police back to the next street toward the site.
+- **It sets ambushes.** A riot squad waits crouched in a side street short of
+  a barricade, invisible to a crowd that only perceives what it faces. When
+  the crowd fights at the barricade, the squad charges out across the street,
+  cuts the crowd in two and sweeps the rear part back.
+- **It picks its operations.** Watch, escort a march, cordon, protect the
+  site, kettle (opening a filter gate once the crowd calms down), or disperse:
+  a loudspeaker warning, then gas thrown upwind of the violent core, never
+  into a packed mass or a kettle, then water cannon and advancing lines.
+- **It learns.** Breached barricades get more squads, ambushes are used more
+  or less as they work, worn-out lines are relieved by fresh squads, and
+  escalation weighs violence against how close crowds are to the site and
+  how the footage looks.
+
+`cargo headless police` prints the commander's crowds, cordons, squads and
+radio calls as a riot runs.
+
 ## Pathfinding
 
 People route on flow fields built in tiles along a corridor of 128 m regions
@@ -149,6 +194,10 @@ minutes of game time, so run them optimized. Among them:
   broadcast spreads, a kettle closes, bottles never pass a shield line,
   shields cover officers from the front, and a violent riot is not a
   massacre.
+- **Police** (`crates/riot_sim/tests/police.rs`): the police barricade a
+  crowd's route before it arrives and the crowd goes round the other way; an
+  ambush waits unseen in a side street and charges when the crowd fights at
+  the barricade.
 - **Data**: every scenario loads and runs, and `data/tunables.ron` lists
   every tunable with its default.
 

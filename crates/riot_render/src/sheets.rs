@@ -408,6 +408,8 @@ pub enum Thing {
     Bench,
     Barrier,
     Barricade,
+    /// A police crowd-control barrier: steel, hazard stripes, a blue panel.
+    PoliceBarrier,
     /// Police van; lights off (0) or flashing (1, 2).
     Van(u8),
     WaterCannon(u8),
@@ -432,6 +434,7 @@ impl Thing {
             Thing::Bench,
             Thing::Barrier,
             Thing::Barricade,
+            Thing::PoliceBarrier,
         ]);
         for k in 0..3 {
             v.extend([Thing::Van(k), Thing::WaterCannon(k), Thing::Ambulance(k)]);
@@ -448,6 +451,7 @@ impl Thing {
             Thing::Bench => [1.8, 0.6],
             Thing::Barrier => [2.4, 0.24],
             Thing::Barricade => [1.0, 4.8],
+            Thing::PoliceBarrier => [2.66, 0.6],
             Thing::Van(_) | Thing::Ambulance(_) => [5.2, 2.0],
             Thing::WaterCannon(_) => [8.0, 2.5],
             Thing::Supply(_) => [1.3, 1.3],
@@ -652,6 +656,29 @@ fn paint_thing(s: &mut Sheet, t: Thing) {
                     },
                 );
             }
+            s.outline(OUTLINE);
+        }
+        Thing::PoliceBarrier => {
+            // Feet, a steel frame in hazard stripes and a POLICE panel.
+            for x in [-1.18, 1.18] {
+                s.fill(&Shape::Box([x, 0.0], [0.1, 0.28], 0.0, 0.03), hex(0x45484e));
+            }
+            let steel = hex(0xc9ced4);
+            s.shaded(&Shape::Box([0.0, 0.0], [1.28, 0.12], 0.0, 0.02), steel, 0.3);
+            for k in 0..11 {
+                let x = -1.15 + k as f32 * 0.23;
+                let c = if k % 2 == 0 {
+                    hex(0xf0c020)
+                } else {
+                    hex(0x1d1d20)
+                };
+                s.fill(&Shape::Box([x, 0.0], [0.08, 0.1], 0.0, 0.0), c);
+            }
+            s.fill(
+                &Shape::Box([0.0, 0.0], [0.34, 0.11], 0.0, 0.02),
+                hex(0x1f4fb0),
+            );
+            s.line([-0.24, 0.0], [0.24, 0.0], 1.0, hex(0xf2f4f8));
             s.outline(OUTLINE);
         }
         Thing::Barricade => {

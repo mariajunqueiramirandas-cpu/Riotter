@@ -549,7 +549,7 @@ impl Renderer {
         // Markers, selection and tools at screen resolution.
         set_camera(&cam.mq_camera());
         if self.options.debug {
-            debug::draw_debug_markers(f.cur, &self.entries, &cam, &mut self.labels);
+            debug::draw_debug_markers(f.cur, &self.entries, &cam, f.time, &mut self.labels);
         }
         if let Some(id) = f.selected
             && let Some(p) = Self::person_pos(f.prev, f.cur, f.alpha, id)

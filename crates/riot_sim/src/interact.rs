@@ -607,10 +607,23 @@ fn die(w: &mut World, i: usize) {
 }
 
 /// A violent act by a protester: footage blames the movement, police notice.
+/// Officers within 25 m who can see it (evidence gatherers and spotters)
+/// identify whoever did it, as a camera would.
 fn movement_act(w: &mut World, i: usize, pos: Vec2, severity: f32) {
     let s = w.people.stable_id[i];
-    let seen = w.outcome.movement_act(w.tick, pos, &w.fields, severity, s);
+    let filmed = w.outcome.movement_act(w.tick, pos, &w.fields, severity, s);
     w.police.violence += severity;
+    w.police.cmd.note_violence(w.tick, pos, severity);
+    let spotted = !filmed
+        && w.police.on_map.iter().any(|&o| {
+            w.index_of(o).is_some_and(|j| {
+                let q = w.people.pos(j);
+                (q - pos).len2() < 625.0
+                    && w.people.stat[j][stat::ACTION] != Action::Lurk as u8
+                    && w.map.ray_blocked(q, pos).is_none()
+            })
+        });
+    let seen = filmed || spotted;
     w.fields.stamp(
         crate::fields::Layer::Threat,
         pos,
@@ -621,7 +634,10 @@ fn movement_act(w: &mut World, i: usize, pos: Vec2, severity: f32) {
     if seen {
         let c = &mut w.cold[s as usize];
         c.filmed = c.filmed.saturating_add(1);
-        w.police.watch.insert(s, 1);
+        c.last_act = w.tick.max(1);
+        if !w.police.watch.contains(s) {
+            w.police.watch.insert(s, 1);
+        }
         w.people.stat[i][stat::FLAGS] |= flag::KNOWN;
     }
 }

@@ -2078,6 +2078,7 @@ impl City {
                     PropKind::Barrier => "barrier",
                     PropKind::Bench => "bench",
                     PropKind::Barricade => "barricade",
+                    PropKind::PoliceBarrier => "police_barrier",
                 };
                 // Tiled rotates about the top-left corner.
                 let (sn, cs) = sin_cos_deg(pr.deg as f64);

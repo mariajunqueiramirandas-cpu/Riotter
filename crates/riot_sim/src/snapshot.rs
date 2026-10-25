@@ -196,6 +196,48 @@ pub struct SnapSquad {
     pub morale: u8,
 }
 
+/// Points kept of a crowd's predicted route.
+pub const SNAP_ROUTE: usize = 16;
+
+/// A crowd the police track, what they make of it and where they think it
+/// is going (DESIGN §14).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SnapTrack {
+    pub x: f32,
+    pub y: f32,
+    pub count: f32,
+    pub radius: f32,
+    /// [`crate::tactics::OpKind`] as `u8`.
+    pub op: u8,
+    /// Recent violence around it, saturating at 255.
+    pub heat: u8,
+    /// Threatens a protected site.
+    pub site: bool,
+    /// Seconds until it reaches the site, or infinity.
+    pub eta: f32,
+    pub route_n: u8,
+    pub route: [[f32; 2]; SNAP_ROUTE],
+}
+
+/// A police barricade across a street (DESIGN §14).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SnapCordon {
+    /// Centre of the barrier line.
+    pub x: f32,
+    pub y: f32,
+    /// Along the line, and toward the crowd.
+    pub axis: [f32; 2],
+    pub face: [f32; 2],
+    pub half: f32,
+    /// [`crate::tactics::CordonState`] as `u8`.
+    pub state: u8,
+    /// 0 none, 1 a squad waits in ambush, 2 sprung.
+    pub ambush: u8,
+    /// Where the ambush waits, and where its side street meets the route.
+    pub ambush_at: [f32; 2],
+    pub junction: [f32; 2],
+}
+
 /// Field layers the renderer can draw (DESIGN §18.2 debug overlays).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -284,6 +326,10 @@ pub struct SnapStats {
     /// Minute of the day.
     pub clock_minute: f32,
     pub internet: bool,
+    /// The police radio: the latest calls, `radio[(radio_n - 1) % RADIO]`
+    /// last ([`crate::tactics::call_text`] says what each means).
+    pub radio: [crate::tactics::RadioCall; crate::tactics::RADIO],
+    pub radio_n: u32,
 }
 
 /// Everything the renderer draws for one tick.
@@ -298,6 +344,8 @@ pub struct Snapshot {
     pub objectives: Vec<SnapObjective>,
     pub drops: Vec<SnapDrop>,
     pub squads: Vec<SnapSquad>,
+    pub tracks: Vec<SnapTrack>,
+    pub cordons: Vec<SnapCordon>,
     pub fields: FieldSnap,
     pub stats: SnapStats,
 }
@@ -321,6 +369,8 @@ pub struct SnapshotSizes {
     pub objectives: usize,
     pub drops: usize,
     pub squads: usize,
+    pub tracks: usize,
+    pub cordons: usize,
     /// Field cells in all chunks that can be active at once.
     pub field_cells: usize,
     pub field_chunks: usize,
@@ -340,6 +390,8 @@ impl Snapshot {
         to(&mut self.objectives, n.objectives);
         to(&mut self.drops, n.drops);
         to(&mut self.squads, n.squads);
+        to(&mut self.tracks, n.tracks);
+        to(&mut self.cordons, n.cordons);
         let f = &mut self.fields;
         to(&mut f.chunks, n.field_chunks);
         to(&mut f.gas, n.field_cells);
@@ -358,6 +410,8 @@ impl Snapshot {
         copy_vec(&mut self.objectives, &other.objectives);
         copy_vec(&mut self.drops, &other.drops);
         copy_vec(&mut self.squads, &other.squads);
+        copy_vec(&mut self.tracks, &other.tracks);
+        copy_vec(&mut self.cordons, &other.cordons);
         let (f, o) = (&mut self.fields, &other.fields);
         f.tick = o.tick;
         f.chunk_cells = o.chunk_cells;

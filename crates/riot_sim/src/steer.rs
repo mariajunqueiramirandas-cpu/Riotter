@@ -268,7 +268,11 @@ pub fn steer(
                     }
                     Action::Rest | Action::Chant => {}
                     Action::Idle => idle(stable, cx, &mut desired, speed * 0.35),
-                    Action::Formation | Action::Arrest | Action::Escort | Action::Strike => {
+                    Action::Formation
+                    | Action::Arrest
+                    | Action::Escort
+                    | Action::Strike
+                    | Action::Lurk => {
                         let ot = cx
                             .officer_targets
                             .get(stable as usize)
@@ -281,12 +285,17 @@ pub fn steer(
                             speed = a.run * (1.0 - 0.4 * fatigue);
                         }
                         // The director keeps a route goal while the target is
-                        // far or behind a wall.
-                        if d > 2.0 && ot.goal != NO_GOAL {
-                            if let Some(dir) = route(ot.goal, rec, ot.pos) {
-                                desired = dir * speed;
-                            }
-                        } else if d > 0.25 {
+                        // far or behind a wall; inside the goal's disc, or
+                        // without one, straight for the slot.
+                        let mut routed = false;
+                        if d > 2.0
+                            && ot.goal != NO_GOAL
+                            && let Some(dir) = route(ot.goal, rec, ot.pos)
+                        {
+                            desired = dir * speed;
+                            routed = true;
+                        }
+                        if !routed && d > 0.25 {
                             desired = to * (speed.min(d * 1.5) / d);
                         }
                         face = Some(if d > 2.0 && act != Action::Strike {

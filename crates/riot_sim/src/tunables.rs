@@ -59,6 +59,7 @@ tunables! {
     flow_density_cost = 6.0, "Route cost per person per 4 m² field cell.";
     flow_gas_cost = 40.0, "Route cost per unit of gas.";
     flow_fire_cost = 150.0, "Route cost per unit of fire.";
+    flow_block_cost = 120.0, "Route cost of a cell across a police barrier: like this many people per cell, so routes go round a barricade when they can.";
     avoid_strength = 1.2, "Anticipatory avoidance strength.";
     avoid_horizon = 1.6, "Time-to-collision horizon for avoidance (s).";
     wall_avoid = 0.8, "Wall avoidance strength.";
@@ -118,6 +119,11 @@ tunables! {
     deescalate_ticks = 2400.0, "Calm ticks before the director steps down a rung.";
     officer_break_fear = 0.75, "Officer fear at which formation breaks.";
     kettle_shrink = 0.004, "Kettle radius shrink per tick (fraction).";
+    barrier_push = 1.5, "Strength (of 255) a police barrier loses per check (every 10 ticks) per unit of push: pressure × anger × 2, plus anger over 0.4.";
+    barrier_brace = 0.3, "Fraction of the crowd's push each officer bracing a barrier from behind takes off (at least 15% always gets through).";
+    ambush_violence = 2.0, "Violence at a barricade (severity over the last 20 s) that springs an ambush waiting for it.";
+    charge_ticks = 600.0, "Ticks a sprung ambush charges and sweeps before it holds a line.";
+    relief_fatigue = 0.45, "Squad fatigue at which a fresh reserve squad takes over its line.";
     water_force = 3.0, "Water cannon impulse (m/s).";
     water_range = 25.0, "Water cannon reach (m).";
     fire_spread = 0.03, "Per-tick chance fire spreads to a neighbouring fuel cell.";

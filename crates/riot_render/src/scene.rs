@@ -52,6 +52,10 @@ pub fn build(
         return;
     }
     for (i, p) in snap_.props.iter().enumerate() {
+        // Police barriers taken away.
+        if p.flags & 16 != 0 {
+            continue;
+        }
         let r = p.half_x.max(p.half_y);
         if !area.overlaps(&Rect::new(p.x - r, p.y - r, 2.0 * r, 2.0 * r)) {
             continue;
@@ -71,11 +75,23 @@ pub fn build(
             1 => (Thing::Bin, 1.1),
             2 => (Thing::Barrier, 1.0),
             3 => (Thing::Bench, 0.5),
+            5 => (Thing::PoliceBarrier, 1.1),
             _ => (Thing::Barricade, 1.2),
         };
         let c = [p.x, p.y];
-        let cs = [p.cos, p.sin];
-        let half = [p.half_x, p.half_y];
+        let mut cs = [p.cos, p.sin];
+        // A barrier is drawn as thin as it is, whatever room it takes up; a
+        // toppled police barrier lies askew.
+        let mut half = [p.half_x, p.half_y];
+        if p.kind == 2 {
+            half[1] = half[1].min(0.16);
+        }
+        if p.kind == 5 && destroyed {
+            let k = (hash(i as u32) % 5) as f32 * 0.08 - 0.16;
+            cs = [p.cos - k * p.sin, p.sin + k * p.cos];
+            let n = (cs[0] * cs[0] + cs[1] * cs[1]).sqrt();
+            cs = [cs[0] / n, cs[1] / n];
+        }
         let sh = [c[0] + SUN[0] * height, c[1] + SUN[1] * height];
         m.at(
             SHADOWS,
@@ -84,6 +100,9 @@ pub fn build(
         )
         .obb(sh, cs, [half[0] * 0.92, half[1] * 0.92], SHADOW);
         let mut col = shade(0.5 + 0.5 * health, 255);
+        if p.kind == 5 && destroyed {
+            col = shade(0.55, 255);
+        }
         if burning {
             col = [150, 96, 80, 255];
         }

@@ -145,7 +145,8 @@ pub struct Prop {
     pub half: Vec2,
     pub ax: Vec2,
     pub health: u8,
-    /// 1 = burning, 2 = under construction, 4 = destroyed, 8 = overturned.
+    /// 1 = burning, 2 = under construction, 4 = destroyed, 8 = overturned,
+    /// 16 = taken away.
     pub flags: u8,
     /// Construction progress (0..=255).
     pub build: u8,
@@ -156,6 +157,8 @@ pub mod prop_flag {
     pub const BUILDING: u8 = 2;
     pub const DESTROYED: u8 = 4;
     pub const OVERTURNED: u8 = 8;
+    /// Gone from the map (police barriers taken down): not drawn.
+    pub const REMOVED: u8 = 16;
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -520,6 +523,8 @@ impl World {
             objectives: MAX_OBJECTIVES,
             drops: w.drops.capacity(),
             squads: w.police.squads.capacity(),
+            tracks: crate::tactics::MAX_TRACKS,
+            cordons: crate::tactics::MAX_CORDONS,
             field_cells: w.fields.pool * crate::fields::CL,
             field_chunks: w.fields.pool,
         };
@@ -683,8 +688,10 @@ impl World {
                 }
             }
             DebugCommand::Threat { x, y, amount } => {
-                self.fields
-                    .stamp(Layer::Threat, Vec2::new(x, y), 6.0, amount, &self.map)
+                // Trouble, as the police see it.
+                let p = Vec2::new(x, y);
+                self.fields.stamp(Layer::Threat, p, 6.0, amount, &self.map);
+                self.police.cmd.note_violence(self.tick, p, amount / 3.0);
             }
             DebugCommand::Escalate { rung } => self
                 .police
@@ -983,7 +990,11 @@ impl World {
                         c: pr.pos,
                         ax: pr.ax,
                         half: pr.half,
-                        kind: 0,
+                        kind: if pr.kind == PropKind::PoliceBarrier {
+                            2
+                        } else {
+                            0
+                        },
                         id: k as u16,
                     });
                 }
