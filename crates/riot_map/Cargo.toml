@@ -11,5 +11,12 @@ riot_core.workspace = true
 riot_defs.workspace = true
 rayon.workspace = true
 
+[dev-dependencies]
+# `tests/build_digest.rs` builds the nav map of generated, testkit and
+# Tiled maps.
+riot_data_citygen.workspace = true
+riot_data_tiled.workspace = true
+riot_testkit.workspace = true
+
 [lints]
 workspace = true

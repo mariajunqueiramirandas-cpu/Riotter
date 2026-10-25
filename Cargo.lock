@@ -525,7 +525,10 @@ version = "0.1.0"
 dependencies = [
  "rayon",
  "riot_core",
+ "riot_data_citygen",
+ "riot_data_tiled",
  "riot_defs",
+ "riot_testkit",
 ]
 
 [[package]]
