@@ -129,17 +129,37 @@ fn any_bits(v: &[f32]) -> bool {
 // the f32 multiplication does, subnormal results included: [`mul_w`] gives
 // the same bits as `*` on any IEEE-754 machine, and such small values are
 // normal f64 numbers. The passes over a layer take this path for the rows
-// that hold tiny values.
+// that hold tiny values: values whose products, through the weights of the
+// steps still ahead of them, could fall below 2^-126 (see `tiny_limit`).
 
-/// A value below this, 2^-72 (and not zero), sends its row down the f64
-/// path. From larger values and weights of at least [`TINY_WEIGHT`], the
-/// f32 path makes nothing below 2^-126 (a row pass, a column pass, the
-/// decay and the open mask take 2^-52 at most), unless signs cancel.
-const TINY: f32 = f32::from_bits((127 - 72) << 23);
+/// Absorb takes the f64 products for an agent with a sample (not zero)
+/// below this, 2^-96: room for the chains of products with tunables and
+/// emotions that follow its samples.
+const TINY: f32 = f32::from_bits((127 - 96) << 23);
 
-/// A weight this small, 2^-24 (and not zero), sends every row down the f64
-/// path.
-const TINY_WEIGHT: f32 = f32::from_bits((127 - 24) << 23);
+/// The least value (as bits) whose products through `factors`, the weights
+/// of the steps a value still goes through (a pass's kernel, the decay, the
+/// open mask), stay at 2^-125 or more: rows holding a smaller value that is
+/// not zero take the f64 path. Factors of 1 or more, or 0, shrink nothing;
+/// sums of values of one sign are no smaller than their terms. Capped at
+/// 2^-20, past which nearly every row goes wide anyway.
+fn tiny_limit(factors: &[f32]) -> u32 {
+    let shrink: f64 = factors
+        .iter()
+        .map(|&f| f.abs() as f64)
+        .filter(|&a| a > 0.0 && a < 1.0)
+        .product();
+    let t = (f64::from_bits((1023 - 125) << 52) / shrink).min(f64::from_bits((1023 - 20) << 52));
+    (t as f32).to_bits()
+}
+
+/// The smallest weight in `k` that is not zero.
+fn least_weight(k: &[f32]) -> f32 {
+    k.iter()
+        .map(|w| w.abs())
+        .filter(|&w| w > 0.0)
+        .fold(1.0, f32::min)
+}
 
 /// `x * k` in f64, for a `k` from [`wide`]: exactly the f32 product.
 #[inline(always)]
@@ -155,27 +175,21 @@ fn wide(k: f32) -> f64 {
     std::hint::black_box(k as f64)
 }
 
-/// Some value is not zero but smaller than [`TINY`].
+/// Some value is not zero but smaller than the float with bits `lim`.
 #[inline]
-fn any_tiny(v: &[f32]) -> bool {
-    let lim = TINY.to_bits() - 1;
+fn any_tiny(v: &[f32], lim: u32) -> bool {
     v.iter().fold(u32::MAX, |m, &x| {
         m.min((x.to_bits() & 0x7fff_ffff).wrapping_sub(1))
-    }) < lim
-}
-
-/// Some weight is not zero but smaller than [`TINY_WEIGHT`].
-fn tiny_weight(w: &[f32]) -> bool {
-    w.iter().any(|&k| k != 0.0 && k.abs() < TINY_WEIGHT)
+    }) < lim.wrapping_sub(1)
 }
 
 /// `v *= k` over a layer, with the f64 products on rows that hold tiny
 /// values (`kw` is `wide(k)`).
 #[inline]
 fn decay_rows(v: &mut [f32], k: f32, kw: f64) {
-    let all_wide = tiny_weight(&[k]);
+    let lim = tiny_limit(&[k]);
     for row in rows_mut(v) {
-        if all_wide || any_tiny(row) {
+        if any_tiny(row, lim) {
             for x in row.iter_mut() {
                 *x = mul_w(*x, kw);
             }
@@ -639,7 +653,12 @@ impl Fields {
         let li = l as usize;
         let open_i = Layer::Open as usize;
         // Rows near tiny values take exact f64 products (see `mul_w`).
-        let all_wide = tiny_weight(&kx) || tiny_weight(&ky) || tiny_weight(&[decay]);
+        let mask = if mask_open { 1.0 / 16.0 } else { 1.0 };
+        let (wx, wy) = (least_weight(&kx), least_weight(&ky));
+        let (lim_row, lim_col) = (
+            tiny_limit(&[wx, wy, decay, mask]),
+            tiny_limit(&[wy, decay, mask]),
+        );
         let (kxw, kyw, decay_w) = (kx.map(wide), ky.map(wide), wide(decay));
         // What the passes make of +0.0. Where that is +0.0 again (unless a
         // weight is negative or NaN), a chunk whose rows read only +0.0
@@ -699,7 +718,7 @@ impl Fields {
                         row[CC + 2] = right.map_or(0.0, |r| r[y][0]);
                         row[CC + 3] = right.map_or(0.0, |r| r[y][1]);
                         let o = &mut out[y];
-                        if all_wide || any_tiny(&row) {
+                        if any_tiny(&row, lim_row) {
                             for x in 0..CC {
                                 o[x] = mul_w(row[x], kxw[0])
                                     + mul_w(row[x + 1], kxw[1])
@@ -716,7 +735,7 @@ impl Fields {
                                     + kx[4] * row[x + 4];
                             }
                         }
-                        t |= (any_tiny(o) as u64) << y;
+                        t |= (any_tiny(o, lim_col) as u64) << y;
                     }
                     *tiny = t;
                 });
@@ -787,7 +806,7 @@ impl Fields {
                     let (a, b, c0, e, f) = (row(y - 2), row(y - 1), row(y), row(y + 1), row(y + 2));
                     let o = &mut out[y as usize];
                     let open = &open[y as usize];
-                    if all_wide || (tiny >> y) & 0x1f != 0 {
+                    if (tiny >> y) & 0x1f != 0 {
                         for x in 0..CC {
                             o[x] = mul_w(
                                 mul_w(a[x], kyw[0])
@@ -836,7 +855,8 @@ impl Fields {
         assert!(layers.len() <= FUSED);
         let c = 1.0 - 2.0 * a;
         // Rows near tiny values take exact f64 products (see `mul_w`).
-        let all_wide = tiny_weight(&[a, c]);
+        let w = least_weight(&[a, c]);
+        let (lim_row, lim_col) = (tiny_limit(&[w, w]), tiny_limit(&[w]));
         let (aw, cw) = (wide(a), wide(c));
         // What the passes make of +0.0: see `filter`.
         let zrow = a * (0.0 + 0.0) + c * 0.0;
@@ -890,7 +910,7 @@ impl Fields {
                             row[0] = left.map_or(0.0, |l| l[y][CC - 1]);
                             row[CC + 1] = right.map_or(0.0, |r| r[y][0]);
                             let o = &mut o[y];
-                            if all_wide || any_tiny(&row) {
+                            if any_tiny(&row, lim_row) {
                                 for x in 0..CC {
                                     o[x] = mul_w(row[x] + row[x + 2], aw) + mul_w(row[x + 1], cw);
                                 }
@@ -899,7 +919,7 @@ impl Fields {
                                     o[x] = a * (row[x] + row[x + 2]) + c * row[x + 1];
                                 }
                             }
-                            t |= (any_tiny(o) as u64) << y;
+                            t |= (any_tiny(o, lim_col) as u64) << y;
                         }
                         tiny[j] = t;
                     }
@@ -956,7 +976,7 @@ impl Fields {
                         let r1 = &me[y];
                         let r2 = if y + 1 < CC { &me[y + 1] } else { below };
                         let o = &mut out[y];
-                        if all_wide || (tiny >> y) & 7 != 0 {
+                        if (tiny >> y) & 7 != 0 {
                             for x in 0..CC {
                                 o[x] = mul_w(r0[x] + r2[x], aw) + mul_w(r1[x], cw);
                             }
@@ -1467,7 +1487,7 @@ fn react(
     let [w, threat, fear_field, anger_field] = dense;
     // Products of samples: exact f64 products when one is tiny (see
     // `mul_w`), which is rare enough to keep the f32 ones otherwise.
-    let tiny = any_tiny(&dense);
+    let tiny = any_tiny(&dense, TINY.to_bits());
     let mul = |a: f32, b: f32| if tiny { mul_w(a, wide(b)) } else { a * b };
     let threat = mul(threat, 0.1).min(1.0);
     if !officer {
@@ -1624,7 +1644,20 @@ mod tests {
     }
 
     #[test]
+    fn tiny_limits() {
+        let p = |e: i32| f32::from_bits(((127 + e) as u32) << 23).to_bits();
+        assert_eq!(tiny_limit(&[]), p(-125));
+        assert_eq!(tiny_limit(&[1.0, 0.0, 3.0]), p(-125));
+        assert_eq!(tiny_limit(&[0.5, 0.25]), p(-122));
+        assert_eq!(tiny_limit(&[-0.5]), p(-124));
+        assert_eq!(tiny_limit(&[1e-30, 1e-30]), p(-20));
+        assert_eq!(least_weight(&[0.0, 0.2, -0.05, 0.6]), 0.05);
+    }
+
+    #[test]
     fn tiny_values() {
+        const TINY: f32 = f32::from_bits((127 - 72) << 23);
+        let any_tiny = |v: &[f32]| any_tiny(v, TINY.to_bits());
         assert!(!any_tiny(&[
             0.0,
             -0.0,
