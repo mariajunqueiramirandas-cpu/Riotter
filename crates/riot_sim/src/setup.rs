@@ -357,4 +357,12 @@ pub enum NotableKind {
     MetroClosed,
     ObjectiveTaken,
     EscalationRaised,
+    /// Police barriers stand across a street.
+    BarricadeUp,
+    /// A crowd toppled a police barrier.
+    BarrierBreached,
+    /// Police charged out of a side street.
+    AmbushSprung,
+    /// A kettle opened a filter gate.
+    KettleReleased,
 }

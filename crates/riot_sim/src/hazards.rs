@@ -158,6 +158,7 @@ impl Hazards {
 /// Keep chunks with emitters, fire or projectiles active.
 pub fn pin_emitters(w: &mut World) {
     w.fields.pinned.fill(false);
+    crate::tactics::pin_barriers(w);
     for k in 0..w.hazards.emitters.len() {
         let p = w.hazards.emitters[k].pos;
         let (cx, cy) = w.fields.chunk_at(p);
@@ -432,6 +433,11 @@ pub fn projectiles(w: &mut World) {
                 w.hazards.hits += 1;
                 let dmg = riot_core::narrow_u8(w.tun.projectile_damage);
                 crate::interact::damage(w, j, dmg, pr.owner, crate::outcome::Harm::Projectile);
+            }
+            if pr.kind != ProjectileKind::Canister
+                && Archetype::from_u8(w.people.stat[j][stat::ARCH]).is_officer()
+            {
+                w.police.cmd.note_violence(tick, at, 0.5);
             }
             if pr.kind == ProjectileKind::Molotov {
                 w.hazards.ignite(at, &mut w.fields, &w.map, &mut w.props);

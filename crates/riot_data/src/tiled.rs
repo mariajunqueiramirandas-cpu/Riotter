@@ -861,9 +861,10 @@ impl Conv<'_> {
             "barrier" => (PropKind::Barrier, [1.2, 0.12]),
             "bench" => (PropKind::Bench, [0.9, 0.3]),
             "barricade" => (PropKind::Barricade, [1.5, 0.5]),
+            "police_barrier" => (PropKind::PoliceBarrier, [1.25, 0.3]),
             other => {
                 return Err(DataError::new(format!(
-                    "unknown prop type \"{other}\" (expected car, bin, barrier, bench or barricade)"
+                    "unknown prop type \"{other}\" (expected car, bin, barrier, bench, barricade or police_barrier)"
                 )));
             }
         };

@@ -59,9 +59,12 @@ pub enum Layer {
     /// Civilians per cell, smoothed like `Fear` and `Anger`: those two hold
     /// smoothed sums, so `Fear / Weight` is the local mean (DESIGN §8).
     Weight = 12,
+    /// Police barriers and roadblocks, 0..1: routes price it like a wall
+    /// they could still push through. Rewritten by the police commander.
+    Block = 13,
 }
 
-pub const LAYERS: usize = 13;
+pub const LAYERS: usize = 14;
 /// Layers one fused blur pass can carry.
 pub const FUSED: usize = 3;
 
@@ -82,6 +85,11 @@ pub struct Fields {
     pub idle: Vec<u16>,
     pub people_in: Vec<u32>,
     pub pinned: Vec<bool>,
+    /// Slots whose `Block` layer holds anything: routes look for barriers
+    /// only there.
+    pub blocked: Vec<bool>,
+    /// Anything is blocked anywhere.
+    pub block_live: bool,
     pub slot_runs: Vec<[u32; 2]>,
     /// Cells of each slot that hold people this tick, so the next scatter
     /// clears only those instead of whole layers.
@@ -112,6 +120,8 @@ impl Fields {
             idle: vec![0; pool],
             people_in: vec![0; pool],
             pinned: vec![false; pool],
+            blocked: vec![false; pool],
+            block_live: false,
             slot_runs: vec![[0; 2]; pool],
             written: vec![0; pool * CL],
             written_n: vec![0; pool],
@@ -181,6 +191,7 @@ impl Fields {
         self.slot_chunk[slot] = c;
         self.idle[slot] = 0;
         self.written_n[slot] = 0;
+        self.blocked[slot] = false;
         self.active += 1;
         let o = slot * LAYERS * CL;
         self.data[o..o + LAYERS * CL].fill(0.0);
@@ -400,6 +411,7 @@ impl Fields {
                     let (lx, ly) = demorton2(run.key & 0xfff);
                     let cell = ly as usize * CC + lx as usize;
                     let (mut n, mut sf, mut sa, mut off, mut inj) = (0u32, 0u32, 0u32, 0u32, 0u32);
+                    let mut seen = 0u32;
                     for &i in &sp.fsort.order[run.start as usize..run.end as usize] {
                         let i = i as usize;
                         let st = p.stat[i];
@@ -407,6 +419,10 @@ impl Fields {
                         n += 1;
                         if Archetype::from_u8(st[stat::ARCH]).is_officer() {
                             off += 1;
+                            // An ambush lying in wait shows no threat.
+                            if st[stat::ACTION] != Action::Lurk as u8 {
+                                seen += 1;
+                            }
                         } else {
                             sf += e[emo::FEAR] as u32;
                             sa += e[emo::ANGER] as u32;
@@ -425,8 +441,8 @@ impl Fields {
                         anger[cell] += gain * sa as f32 * (1.0 / 255.0);
                         weight[cell] += gain * civ as f32;
                     }
-                    if threat_tick && off > 0 {
-                        threat[cell] += t_officer * off as f32;
+                    if threat_tick && seen > 0 {
+                        threat[cell] += t_officer * seen as f32;
                     }
                 }
             });

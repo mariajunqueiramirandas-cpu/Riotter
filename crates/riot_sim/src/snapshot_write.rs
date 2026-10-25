@@ -156,6 +156,55 @@ pub fn write(w: &mut World) {
         }
     }
 
+    s.tracks.clear();
+    for t in &w.police.cmd.tracks {
+        if t.count < 100.0 || s.tracks.len() == s.tracks.capacity() {
+            continue;
+        }
+        let mut st = SnapTrack {
+            x: t.centroid.x,
+            y: t.centroid.y,
+            count: t.count,
+            radius: t.radius,
+            op: t.op as u8,
+            heat: narrow_u8(t.heat / 20.0),
+            site: t.site != crate::tactics::NO_SITE,
+            eta: t.eta,
+            route_n: t.route_n.min(SNAP_ROUTE as u8),
+            route: [[0.0; 2]; SNAP_ROUTE],
+        };
+        for (k, q) in t.route[..st.route_n as usize].iter().enumerate() {
+            st.route[k] = [q.x, q.y];
+        }
+        s.tracks.push(st);
+    }
+    s.cordons.clear();
+    for c in &w.police.cmd.cordons {
+        if !c.live() || s.cordons.len() == s.cordons.capacity() {
+            continue;
+        }
+        // A sprung ambush shows for a minute.
+        let (ambush, at, junction) = match c.ambush {
+            Some(a) if a.sprung == 0 || w.tick.wrapping_sub(a.sprung) < 1200 => (
+                1 + (a.sprung != 0) as u8,
+                [a.pos.x, a.pos.y],
+                [a.junction.x, a.junction.y],
+            ),
+            _ => (0, [0.0; 2], [0.0; 2]),
+        };
+        s.cordons.push(SnapCordon {
+            x: c.pos.x,
+            y: c.pos.y,
+            axis: [c.axis.x, c.axis.y],
+            face: [c.face.x, c.face.y],
+            half: c.half,
+            state: c.state as u8,
+            ambush,
+            ambush_at: at,
+            junction,
+        });
+    }
+
     // Field layers every few ticks.
     let every = w.snap_cfg.fields_every;
     if every > 0 && w.tick.is_multiple_of(every) {
@@ -280,5 +329,7 @@ pub fn write(w: &mut World) {
     st.police_blame = w.outcome.footage.police.blame;
     st.clock_minute = w.clock_minute();
     st.internet = w.internet;
+    st.radio = w.police.cmd.radio;
+    st.radio_n = w.police.cmd.radio_n;
     w.snapshot.stats = st;
 }

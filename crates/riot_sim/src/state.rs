@@ -40,10 +40,12 @@ pub enum Action {
     Escort = 16,
     /// Ride in a van (not on the map).
     Board = 17,
+    /// Wait out of sight for an ambush: crouched, silent, no threat.
+    Lurk = 18,
 }
 
 pub const CIVILIAN_ACTIONS: usize = 12;
-pub const ACTIONS: usize = 18;
+pub const ACTIONS: usize = 19;
 
 impl Action {
     pub const ALL: [Action; ACTIONS] = [
@@ -65,6 +67,7 @@ impl Action {
         Action::Arrest,
         Action::Escort,
         Action::Board,
+        Action::Lurk,
     ];
 
     #[inline]
@@ -117,6 +120,7 @@ impl Action {
             Action::Arrest => "arrest",
             Action::Escort => "escort",
             Action::Board => "board",
+            Action::Lurk => "lurk",
         }
     }
 }

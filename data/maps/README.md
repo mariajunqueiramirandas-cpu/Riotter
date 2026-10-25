@@ -46,7 +46,7 @@ for a generated map directly instead of a file:
 | `ground`   | tile       | tiles with a `ground` property                                   | ground types (4 m cells)      |
 | `solids`   | object     | polygons, rectangles, ellipses; type `building`, `wall`, `water`, `fence` | collision shapes     |
 | `overhead` | object     | polygons, rectangles, ellipses; type is free (`canopy`, `arcade`, `bridge`) | drawn above people, walkable |
-| `props`    | object     | rectangles (or points); type `car`, `bin`, `barrier`, `bench`, `barricade` | pushable, burnable boxes |
+| `props`    | object     | rectangles (or points); type `car`, `bin`, `barrier`, `bench`, `barricade`, `police_barrier` | pushable, burnable boxes |
 | `roads`    | object     | polylines (a polygon is a closed loop)                           | the road graph vans drive on  |
 | `entries`  | object     | named points or ellipses; type `map_edge`, `metro`, `bus`        | where people arrive and leave |
 | `depots`   | object     | named points                                                     | police depots                 |
@@ -83,10 +83,12 @@ renderer draws them on top. Ellipses become 16-sided polygons. Purely visual.
 
 ### `props`
 
-Parked cars, bins, crowd-control barriers, benches and pre-built barricades.
-Each is an oriented box: a rectangle (its size and rotation are used) or a
-point, which gets a default size (car 4.4 × 1.8 m, bin 0.7 m, barrier
-2.4 × 0.24 m, bench 1.8 × 0.6 m, barricade 3 × 1 m). The simulation keeps the
+Parked cars, bins, crowd-control barriers, benches, pre-built barricades and
+police barriers already in place. Each is an oriented box: a rectangle (its
+size and rotation are used) or a point, which gets a default size (car
+4.4 × 1.8 m, bin 0.7 m, barrier 2.4 × 0.24 m, bench 1.8 × 0.6 m, barricade
+3 × 1 m, police barrier 2.5 × 0.6 m). During a riot the police put up more
+police barriers themselves (DESIGN §14). The simulation keeps the
 first `limits.props` of them (8192 by default).
 
 ### `roads`

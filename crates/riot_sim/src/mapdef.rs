@@ -61,6 +61,8 @@ pub enum PropKind {
     Bench = 3,
     /// Built by protesters during the riot.
     Barricade = 4,
+    /// Steel barriers the police put across a street.
+    PoliceBarrier = 5,
 }
 
 impl PropKind {
@@ -70,6 +72,7 @@ impl PropKind {
             1 => PropKind::Bin,
             2 => PropKind::Barrier,
             3 => PropKind::Bench,
+            5 => PropKind::PoliceBarrier,
             _ => PropKind::Barricade,
         }
     }

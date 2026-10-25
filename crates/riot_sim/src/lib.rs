@@ -27,6 +27,7 @@ mod snapshot_write;
 pub mod spatial;
 pub mod state;
 pub mod steer;
+pub mod tactics;
 pub mod testkit;
 pub mod think;
 pub mod tunables;

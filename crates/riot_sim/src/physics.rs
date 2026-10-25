@@ -13,7 +13,7 @@ use riot_core::math::{closest_on_segment, narrow_u8, segment_hit, widen_u8};
 use riot_core::{Buckets, Vec2};
 use riot_team::prelude::*;
 
-use crate::archetype::{ARCHETYPES, ArchetypeParams};
+use crate::archetype::{ARCHETYPES, Archetype, ArchetypeParams};
 use crate::event::Event;
 use crate::map::Map;
 use crate::people::People;
@@ -29,7 +29,7 @@ pub struct Obb {
     /// Unit vector of the box's local x axis.
     pub ax: Vec2,
     pub half: Vec2,
-    /// 0 = prop, 1 = vehicle.
+    /// 0 = prop, 1 = vehicle, 2 = police barrier (officers open their own).
     pub kind: u8,
     pub id: u16,
 }
@@ -380,8 +380,13 @@ pub fn move_bodies(p: &mut People, s: &mut PhysScratch, events: &mut [Vec<Event>
                         }
                     }
                 }
+                let officer = Archetype::from_u8(stat[k][stat::ARCH]).is_officer();
                 for o in cx.grid.near(q) {
-                    if let Some(corr) = cx.obbs[o as usize].push_out(q, r) {
+                    let ob = &cx.obbs[o as usize];
+                    if officer && ob.kind == 2 {
+                        continue;
+                    }
+                    if let Some(corr) = ob.push_out(q, r) {
                         wall_push += corr.len();
                         q += corr;
                     }
@@ -432,7 +437,7 @@ pub fn move_bodies(p: &mut People, s: &mut PhysScratch, events: &mut [Vec<Event>
                             Action::Film => Gait::Film,
                             Action::Throw => Gait::Throw,
                             Action::Strike => Gait::Strike,
-                            Action::Barricade | Action::Help => Gait::Crouch,
+                            Action::Barricade | Action::Help | Action::Lurk => Gait::Crouch,
                             _ => Gait::Stand,
                         }
                     };
@@ -452,6 +457,7 @@ pub fn move_bodies(p: &mut People, s: &mut PhysScratch, events: &mut [Vec<Event>
                         | Action::Rest
                         | Action::Idle
                         | Action::Formation
+                        | Action::Lurk
                         | Action::March
                         | Action::Chant
                 ) || gait == Gait::Fallen;
