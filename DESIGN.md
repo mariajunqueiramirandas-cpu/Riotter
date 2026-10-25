@@ -1,6 +1,6 @@
 # Riotter: Riot Simulation Design
 
-Status: draft v0.2 (2026-10-24). v0.2 makes every person an individual body with exact collision, facing and pose, ready for per-person sprites, grows maps to an 8 km city whose size costs nothing per tick, and settles the camera as top-down 2D.
+Status: draft v0.2 (2026-10-24), implemented; §22 records where the code departs from this text and how it measures against §3. v0.2 makes every person an individual body with exact collision, facing and pose, ready for per-person sprites, grows maps to an 8 km city whose size costs nothing per tick, and settles the camera as top-down 2D.
 
 This document covers **the real-time riot simulation only**: one map (up to an 8 km city), one day of protest, thousands of autonomous people against a police force, with the player influencing events but never commanding them. The turn-based campaign, multiplayer, 3D, audio and UI art are out of scope. The campaign shows up only as the boundary: a `RiotSetup` goes in and a `RiotOutcome` comes out (§17).
 
@@ -865,3 +865,44 @@ Each milestone ends with a performance gate. All numbers are on the §3 referenc
 - **Officer index:** should officers share the civilian body hash (tagged entries) or keep their own? Decide by benchmark in M4.
 - **Game speed:** crossing an 8 km map on foot takes about 1.5 hours. Is 8× enough, or should 16× unlock once sleeping (§7.6) makes it affordable? Should the game speed up automatically when nothing is happening near the player's people?
 - **Map authoring beyond Tiled:** for example, importing OpenStreetMap street layouts to build fictional city centres. That becomes more attractive now that a map is 8 km across.
+
+---
+
+## 22. Implementation status
+
+What the code does where it departs from or settles something in this document, as of the first implementation (October 2026).
+
+**Settled open questions**
+- **Officer index (§21):** officers share the civilian table and body hash, tagged by archetype. One contact solve sees everyone, and police doctrine reads officers through a small per-officer table (squad, slot).
+- **Field cell size (§21):** 2 m for every layer.
+- **Reaction speed (§21):** one think interval for everyone; emergencies (gas, crush, a blow, a new plan) think on the next tick.
+
+**Deviations**
+- **Emotions are dithered (§6.2, §8).** Emotions are bytes, and rounding to nearest after each tick erased every rate below half a step (about 0.002 per tick): relaxation, threat-driven anger and most contagion never moved. `absorb` writes them back with an unbiased random dither from the counter RNG, so rates act as written, on average.
+- **Several announced plans (§2.4, §13).** A scenario may announce more than one objective. Each arrival comes for one of them, drawn by objective weight and by how well its stance suits the archetype; announced plans never supersede each other, and phones carry only organizers' broadcasts.
+- **Stance (§2.4).** An agent's effective stance is the plan's stance weighted by trust in organizers, the archetype's default for the rest, shifted by anger. Provocateurs decide as if enraged.
+- **Harm.** Every health loss is attributed to a cause (baton, blow, projectile, crush, fire, gas) in the outcome. Gas frightens, tires and pushes people but leaves them at 86% health or more; officers wear masks and armour; throws arc over the crowd (only officers, raised shields and the last 4 m of descent can be hit, never someone lying down); routes price fire like gas, and fire burns only inside the flames (above 0.3 of the field); crush damage needs pressure sustained for about half a second.
+- **Leaving.** Anyone who has fled all the way to an exit leaves through it. Gas and blows drain morale, and GoHome is gated on the `leave_morale` tunable, so a dispersed crowd goes home rather than marching back for hours.
+- **Arrests** count when the person is restrained; walking them to the van is logistics.
+- **Police director (§14).** Squads stay with a crowd across replans and hold their post for a minute when it drops out of one; crowds under 150 people draw squads only when violent; a snatch squad moves up behind the line and goes in only for someone within 25 m.
+- **The tick runs on a thread team, not rayon (§12).** On the 4-vCPU cloud VM used for development, a rayon parallel loop costs about 7 µs back to back but 90–120 µs after a stretch of serial work, because idle workers (and the joining thread) sleep and are woken through the OS scheduler; a tick has about 25 such loops. `riot_team` is a small fork-join team whose workers spin for 2 ms after each job before parking (dispatch and join in 1.5–4 µs). Tasks are chunk indices, each run exactly once, so results do not depend on the thread count; reductions must be exact (integer sums, max). Its rayon-shaped API (`par_chunks_mut`, `zip`, `enumerate`, `for_each`, `map`/`reduce`) let the simulation switch by changing one import per module. Its atomics and unsafe code stay in that crate. Rayon still builds maps at load time.
+- **Props are static obstacles.** The obstacle grid for props is rebuilt only when a prop is built, finished or destroyed; moving vehicles have their own small grid rebuilt every tick. Without this, the parked cars of a large map made the per-tick cost grow with map area.
+- **Dependencies (§4.1).** `riot_core` and `riot_sim` use `bytemuck` with its derive macro for the `Pod` lane and snapshot types. `riot_data` adds `serde_json` and `miniz_oxide` (Tiled's zlib and gzip layers).
+- **Sprites (§18).** The paper-doll atlas is generated procedurally in `riot_render`; there is no `data/sprites/`.
+- **Tooling (§19).** Per-phase benchmarks come from `riot_headless bench` (p50, p99, CSV, `--budget`), not criterion. Kernels have unit tests but no proptest suite. Tracy and code hot reload are not integrated; tunables hot reload is.
+
+**Performance against §3 (4-vCPU cloud VM)**
+
+| | Target | Measured |
+|---|---|---|
+| Small protest, 2,000 agents | ≤ 0.7 ms / tick | 0.95 ms (fields 0.43: a spread-out crowd keeps many field chunks active) |
+| Standard riot, 10,309 agents | ≤ 3.0 ms / tick | 3.65 ms p50 (median of three runs) |
+| Map-size independence, 10,000 agents, 8 km vs 512 m | within 5% | +0.9% |
+| Auto-resolve, 10-minute riot | ≤ 40 s | 37.0 s |
+| Auto-resolve, 1 simulated hour | ≤ 2 min | 5 min 41 s: the riot stays active, so few people sleep |
+
+Phases within their §3.1 budgets at 10k: spatial, think, messages, bodies, interactions, director, accounting. Over: fields (0.7 ms against 0.3) and steering (0.8 ms against 0.26). Flow is at its p50 budget but spikes to about 3.5 ms at p99 when many tiles are rebuilt at once. The 50k stretch target (M7) has not been benchmarked.
+
+**Known gaps**
+- Arrests are rare in the standard riot (0–16 per riot) and injuries high (about 2,000 in a 20-minute riot), mostly crowd pressure during the flight from gas. `injuries` counts every time someone is hurt past the injury line, so a person treated by a medic and hurt again counts twice.
+- No ambulances; the overturned-vehicle flag is never set; gas released inside a building has no effect.

@@ -61,6 +61,7 @@ without a display (Xvfb works), which is how the screenshots in
 | Crate | What it is |
 |---|---|
 | `riot_core` | lane storage (`F32x8`, 512-agent chunks), counter-based RNG streams, stable bucket and radix sorts, spatial hash, sparse sets, math |
+| `riot_team` | the fork-join thread team the tick runs on: workers spin between parallel loops instead of sleeping, and each chunk index runs exactly once |
 | `riot_sim` | the simulation: headless, deterministic, fixed 20 Hz tick, no allocation after warm-up. `RiotSetup` goes in, `RiotOutcome` comes out |
 | `riot_data` | Tiled JSON maps, the procedural city generator, RON scenarios and tunables |
 | `riot_headless` | batch runs, benchmarks, determinism and allocation checks, auto-resolve, PNG snapshots, map generation |
@@ -118,17 +119,31 @@ profilers), `profiling` (full debug info) and `dist` (stripped).
 
 ## Performance
 
-DESIGN §3 targets 10,000 agents in 3 ms per tick on a 4-core desktop. See
-the status table below for where the implementation stands.
+DESIGN §3 targets 10,000 agents in 3 ms per 20 Hz tick on a 4-core desktop,
+on any map size. Measured on a 4-vCPU cloud VM (p50 over 400 ticks after
+warm-up; the standard riot is the median of three runs, since run-to-run
+noise there is about ±10%):
 
-| Scenario | Agents | Target | Measured (4-vCPU cloud VM) |
-|---|---|---|---|
-| small protest | 2,000 | 0.7 ms | PERF_SMALL |
-| standard riot | 10,000 | 3.0 ms | PERF_STANDARD |
+| | Target | Measured |
+|---|---|---|
+| Small protest, 2,000 agents | ≤ 0.7 ms / tick | 0.95 ms |
+| Standard riot, 10,309 agents | ≤ 3.0 ms / tick | 3.65 ms |
+| Same crowd on an 8 km vs a 512 m map | within 5% | +0.9% |
+| Auto-resolve, 10-minute riot | ≤ 40 s | 37.0 s |
+| Auto-resolve, 1 simulated hour | ≤ 2 min | 5 min 41 s |
 
-`cargo headless bench` prints p50 and p99 per phase against the DESIGN §3.1
-budget table (`--csv` writes them out, `--budget` fails when a phase is more
-than 10% over).
+At 10k, spatial, think, messages, bodies, interactions, the director and
+accounting are within their §3.1 phase budgets; fields (0.7 ms against 0.3)
+and steering (0.8 ms against 0.26) are not. Fields cost follows the active
+field chunks more than the head count, which is why the small protest, spread
+over the district, misses its target. An hour of riot stays too busy for
+sleeping (§7.6) to help much. The tick runs on `riot_team`, a spinning
+fork-join team: on this VM rayon's wake-ups after serial stretches cost
+about 0.1 ms per parallel loop, which had made the tick 5.6 ms.
+
+`cargo headless bench` prints p50 and p99 per phase against the budget
+table (`--csv` writes them out, `--budget` fails when a phase is more than
+10% over); `cargo headless mapsize` compares map sizes.
 
 ## License
 
