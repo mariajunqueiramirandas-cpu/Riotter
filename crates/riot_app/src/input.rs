@@ -74,6 +74,12 @@ pub enum Verb {
     CycleLod,
     ToggleMarkers,
     ToggleRoofs,
+    /// Pixel art on or off.
+    TogglePixelArt,
+    /// Pixel size: the art's own, or twice as big.
+    CyclePixelSize,
+    /// Time-of-day colour grade on or off.
+    ToggleGrade,
     TogglePhases,
     ToggleHelp,
     Quit,
@@ -113,6 +119,9 @@ const KEYS: &[(KeyCode, Verb)] = &[
     (KeyCode::L, Verb::CycleLod),
     (KeyCode::Tab, Verb::ToggleMarkers),
     (KeyCode::V, Verb::ToggleRoofs),
+    (KeyCode::K, Verb::TogglePixelArt),
+    (KeyCode::J, Verb::CyclePixelSize),
+    (KeyCode::N, Verb::ToggleGrade),
     (KeyCode::P, Verb::TogglePhases),
     (KeyCode::F1, Verb::ToggleHelp),
     (KeyCode::Escape, Verb::Quit),
@@ -473,6 +482,20 @@ impl Input {
             }
             Verb::ToggleMarkers => opts.debug = !opts.debug,
             Verb::ToggleRoofs => opts.roofs = !opts.roofs,
+            Verb::TogglePixelArt => {
+                opts.pixel_art = !opts.pixel_art;
+                let on = if opts.pixel_art { "on" } else { "off" };
+                self.say(format!("pixel art: {on}"), now);
+            }
+            Verb::CyclePixelSize => {
+                opts.chunk = if opts.chunk > 1.5 { 1.0 } else { 2.0 };
+                self.say(format!("pixel size: {}×", opts.chunk), now);
+            }
+            Verb::ToggleGrade => {
+                opts.grade = !opts.grade;
+                let on = if opts.grade { "on" } else { "off" };
+                self.say(format!("time-of-day light: {on}"), now);
+            }
             Verb::TogglePhases => self.show_phases = !self.show_phases,
             Verb::ToggleHelp => self.help = !self.help,
             Verb::Quit => self.quit = true,

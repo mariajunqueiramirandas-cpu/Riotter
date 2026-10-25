@@ -33,6 +33,8 @@ View:
   --lod NAME         auto|far|middle|close
   --window WxH       window size in pixels (default 1280x720)
   --no-markers       hide squad and entry markers
+  --pixel N          pixel size: 1 (the art's own, default), 2 (twice as big),
+                     0 (no pixel art: draw straight at the zoom)
 
 Verification:
   --screenshot PATH  render after --ticks, save a PNG and exit
@@ -59,6 +61,8 @@ pub struct Args {
     pub lod: Option<Lod>,
     pub window: (i32, i32),
     pub markers: bool,
+    /// 0 = no pixel art, else the pixel size.
+    pub pixel: u32,
     pub screenshot: Option<PathBuf>,
     pub frames: u32,
     pub live: f32,
@@ -83,6 +87,7 @@ impl Default for Args {
             lod: None,
             window: (1280, 720),
             markers: true,
+            pixel: 1,
             screenshot: None,
             frames: 30,
             live: 0.0,
@@ -164,6 +169,12 @@ impl Args {
                     a.window = (w, h);
                 }
                 "--no-markers" => a.markers = false,
+                "--pixel" => {
+                    a.pixel = num(&flag, it.next())?;
+                    if a.pixel > 2 {
+                        return Err("--pixel must be 0, 1 or 2".into());
+                    }
+                }
                 "--screenshot" => a.screenshot = Some(num(&flag, it.next())?),
                 "--frames" => a.frames = num::<u32>(&flag, it.next())?.max(1),
                 "--live" => a.live = num::<f32>(&flag, it.next())?.max(0.0),
@@ -202,5 +213,7 @@ mod tests {
         assert!(parse("--camera 1,2").is_err());
         assert!(parse("--bogus").is_err());
         assert!(parse("--size 9000").is_err());
+        assert!(parse("--pixel 3").is_err());
+        assert_eq!(parse("--pixel 0").unwrap().pixel, 0);
     }
 }

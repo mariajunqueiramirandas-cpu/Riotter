@@ -9,12 +9,17 @@
 //! rotates the quad by heading. The CPU does no per-person work per frame.
 //!
 //! Each sprite layer (body, accessory, head, item) is one instanced draw.
+//! In the pixel buffer, sprites are sampled texel for pixel from the atlas
+//! of the buffer's art level and their centres are snapped to whole pixels;
+//! a shadow layer goes under standing people, depth-tested like every other
+//! shadow so a crowd's shadows never stack.
 
 use macroquad::miniquad::*;
 use riot_sim::snapshot::SnapPerson;
 
-use crate::camera::Camera;
-use crate::sprites::{self, ATLAS_H, ATLAS_W, Atlas, PAL_H, PAL_W, Palette};
+use crate::art;
+use crate::pixel::View;
+use crate::sprites::{self, Atlas, PAL_H, PAL_W, Palette};
 
 /// What one instanced draw paints. The shader mirrors these numbers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,6 +34,8 @@ pub enum Layer {
     Mid = 5,
     /// Far level of detail: a quad coloured by state.
     Dot = 6,
+    /// A shadow under a standing person.
+    Shadow = 7,
 }
 
 /// Per-instance buffers for one group of people (e.g. the fallen).
@@ -47,14 +54,19 @@ struct Uniforms {
     params: [f32; 4],
     /// columns, u per cell, v per cell, metres per cell
     atlas: [f32; 4],
+    /// snap to pixels (0/1), keep a minimum size (0/1), unused ×2
+    extra: [f32; 4],
 }
 
 /// GPU state for drawing people.
 pub struct PeoplePipeline {
     pipeline: Pipeline,
+    /// The same shader, depth-tested, for shadows.
+    shadow_pipeline: Pipeline,
     quad_vb: BufferId,
     quad_ib: BufferId,
-    atlas: TextureId,
+    /// One atlas per art level.
+    atlas: Vec<TextureId>,
     palette: TextureId,
     sets: Vec<InstanceSet>,
     /// False on GL 2 contexts without instancing; the caller falls back.
@@ -66,7 +78,7 @@ impl PeoplePipeline {
     /// `groups` is the number of independent instance sets.
     pub fn new(
         ctx: &mut dyn RenderingBackend,
-        atlas: &Atlas,
+        atlases: &[Atlas],
         palette: &Palette,
         groups: usize,
     ) -> PeoplePipeline {
@@ -81,21 +93,41 @@ impl PeoplePipeline {
             BufferUsage::Immutable,
             BufferSource::slice(&[0u16, 1, 2, 0, 2, 3]),
         );
-        let atlas_tex = ctx.new_texture(
-            TextureAccess::Static,
-            TextureSource::Bytes(&atlas.rgba),
-            TextureParams {
-                width: ATLAS_W as u32,
-                height: ATLAS_H as u32,
-                format: TextureFormat::RGBA8,
-                min_filter: FilterMode::Linear,
-                mag_filter: FilterMode::Linear,
-                mipmap_filter: MipmapFilterMode::Linear,
-                allocate_mipmaps: true,
-                ..Default::default()
-            },
-        );
-        ctx.texture_generate_mipmaps(atlas_tex);
+        let atlas_tex: Vec<TextureId> = atlases
+            .iter()
+            .map(|a| {
+                // The coarsest level is also drawn minified when zoomed out
+                // past it, so it keeps mipmaps; the others are only ever
+                // sampled texel for pixel.
+                let last = a.level == art::LEVELS - 1;
+                let t = ctx.new_texture(
+                    TextureAccess::Static,
+                    TextureSource::Bytes(&a.rgba),
+                    TextureParams {
+                        width: sprites::atlas_w(a.level) as u32,
+                        height: sprites::atlas_h(a.level) as u32,
+                        format: TextureFormat::RGBA8,
+                        min_filter: if last {
+                            FilterMode::Linear
+                        } else {
+                            FilterMode::Nearest
+                        },
+                        mag_filter: FilterMode::Nearest,
+                        mipmap_filter: if last {
+                            MipmapFilterMode::Linear
+                        } else {
+                            MipmapFilterMode::None
+                        },
+                        allocate_mipmaps: last,
+                        ..Default::default()
+                    },
+                );
+                if last {
+                    ctx.texture_generate_mipmaps(t);
+                }
+                t
+            })
+            .collect();
         let palette_tex = ctx.new_texture(
             TextureAccess::Static,
             TextureSource::Bytes(&palette.rgba),
@@ -121,6 +153,7 @@ impl PeoplePipeline {
                             UniformDesc::new("cam", UniformType::Float4),
                             UniformDesc::new("params", UniformType::Float4),
                             UniformDesc::new("atlas", UniformType::Float4),
+                            UniformDesc::new("extra", UniformType::Float4),
                         ],
                     },
                 },
@@ -131,29 +164,44 @@ impl PeoplePipeline {
             step_func: VertexStep::PerInstance,
             step_rate: 1,
         };
+        let layouts = [BufferLayout::default(), instance.clone(), instance];
+        let attrs = [
+            VertexAttribute::with_buffer("corner", VertexFormat::Float2, 0),
+            VertexAttribute::with_buffer("pos0", VertexFormat::Float2, 1),
+            VertexAttribute::with_buffer("pose0", VertexFormat::Byte4, 1),
+            VertexAttribute::with_buffer("pos1", VertexFormat::Float2, 2),
+            VertexAttribute::with_buffer("pose1", VertexFormat::Byte4, 2),
+            VertexAttribute::with_buffer("app1", VertexFormat::Byte4, 2),
+        ];
+        let blend = Some(BlendState::new(
+            Equation::Add,
+            BlendFactor::One,
+            BlendFactor::OneMinusValue(BlendValue::SourceAlpha),
+        ));
         let pipeline = ctx.new_pipeline(
-            &[BufferLayout::default(), instance.clone(), instance],
-            &[
-                VertexAttribute::with_buffer("corner", VertexFormat::Float2, 0),
-                VertexAttribute::with_buffer("pos0", VertexFormat::Float2, 1),
-                VertexAttribute::with_buffer("pose0", VertexFormat::Byte4, 1),
-                VertexAttribute::with_buffer("pos1", VertexFormat::Float2, 2),
-                VertexAttribute::with_buffer("pose1", VertexFormat::Byte4, 2),
-                VertexAttribute::with_buffer("app1", VertexFormat::Byte4, 2),
-            ],
+            &layouts,
+            &attrs,
             shader,
             PipelineParams {
-                color_blend: Some(BlendState::new(
-                    Equation::Add,
-                    BlendFactor::One,
-                    BlendFactor::OneMinusValue(BlendValue::SourceAlpha),
-                )),
+                color_blend: blend,
+                ..Default::default()
+            },
+        );
+        let shadow_pipeline = ctx.new_pipeline(
+            &layouts,
+            &attrs,
+            shader,
+            PipelineParams {
+                color_blend: blend,
+                depth_test: Comparison::Less,
+                depth_write: true,
                 ..Default::default()
             },
         );
         let instancing = ctx.info().features.instancing;
         let mut p = PeoplePipeline {
             pipeline,
+            shadow_pipeline,
             quad_vb,
             quad_ib,
             atlas: atlas_tex,
@@ -186,7 +234,7 @@ impl PeoplePipeline {
             bindings: Bindings {
                 vertex_buffers: vec![self.quad_vb, prev, cur],
                 index_buffer: self.quad_ib,
-                images: vec![self.atlas, self.palette],
+                images: vec![self.atlas[0], self.palette],
             },
         }
     }
@@ -224,29 +272,46 @@ impl PeoplePipeline {
     /// Draw one group with the given layers, bottom to top. Must run inside
     /// a render pass.
     pub fn draw(
-        &self,
+        &mut self,
         ctx: &mut dyn RenderingBackend,
         group: usize,
         layers: &[Layer],
-        cam: &Camera,
+        view: &View,
         alpha: f32,
         time: f32,
     ) -> usize {
-        let set = &self.sets[group];
-        if set.len == 0 || !self.instancing {
+        if self.sets[group].len == 0 || !self.instancing {
             return 0;
         }
-        ctx.apply_pipeline(&self.pipeline);
-        ctx.apply_bindings(&set.bindings);
+        let atlas = self.atlas[view.level];
+        let set = &mut self.sets[group];
+        set.bindings.images[0] = atlas;
+        let mut current = None;
         for &layer in layers {
+            let shadow = layer == Layer::Shadow;
+            if current != Some(shadow) {
+                current = Some(shadow);
+                ctx.apply_pipeline(if shadow {
+                    &self.shadow_pipeline
+                } else {
+                    &self.pipeline
+                });
+                ctx.apply_bindings(&set.bindings);
+            }
             let u = Uniforms {
-                cam: cam.uniform(),
-                params: [alpha, layer as u32 as f32, cam.zoom, time],
+                cam: view.cam.uniform(),
+                params: [alpha, layer as u32 as f32, view.cam.zoom, time],
                 atlas: [
                     sprites::COLS as f32,
                     1.0 / sprites::COLS as f32,
                     1.0 / sprites::ROWS as f32,
                     sprites::CELL_M,
+                ],
+                extra: [
+                    view.pixel as u32 as f32,
+                    !view.pixel as u32 as f32,
+                    0.0,
+                    0.0,
                 ],
             };
             ctx.apply_uniforms(UniformsSource::table(&u));
@@ -271,6 +336,7 @@ attribute vec4 app1;    // appearance bytes, little-endian
 uniform vec4 cam;       // clip = (p - cam.xy) * cam.zw
 uniform vec4 params;    // alpha, layer, zoom, time
 uniform vec4 atlas;     // cols, u per cell, v per cell, metres per cell
+uniform vec4 extra;     // snap to pixels, keep a minimum size
 
 varying vec2 v_uv;
 varying vec2 v_pa;
@@ -312,10 +378,11 @@ void main() {
 
     // Size: armoured officers are wider; body type widens the shoulders.
     float s = arch > 8.5 ? 1.3 : (arch > 7.5 ? 1.12 : 1.0);
-    // Zoomed out, keep a person at least a few pixels wide so crowds stay
-    // legible: 4 px as a single sprite, 9 px when fully layered.
+    // Zoomed out past the art, keep a person at least a few pixels wide so
+    // crowds stay legible: 4 px as a single sprite, 9 px when fully layered.
+    // Pixel art is drawn at its own size.
     float min_px = (layer > 3.5 && layer < 5.5) ? 4.0 : 9.0;
-    s *= max(1.0, min_px / (params.z * 0.5));
+    if (extra.y > 0.5) s *= max(1.0, min_px / (params.z * 0.5));
     float wide = 0.92 + body * 0.06;
     float anim = floor(mod(params.w * 7.0 + app1.x + app1.y, 4.0));
     float varied = mod(clothes * 7.0 + 13.0, 64.0);
@@ -329,7 +396,7 @@ void main() {
     vec2 pb = pal(skin, 2.0);
     vec2 pc = pal(clothes, 1.0);
     v_flat = vec4(1.0);
-    v_dot = layer > 5.5 ? 1.0 : 0.0;
+    v_dot = layer > 6.5 ? 2.0 : (layer > 5.5 ? 1.0 : 0.0);
 
     if (layer < 0.5) {
         // Body: one strip per gait.
@@ -383,6 +450,10 @@ void main() {
         pa = pal(clothes, 0.0);
         pb = pal(skin, 2.0);
         pc = (acc > 0.5 && acc < 3.5) ? headwear : pal(hairc, 3.0);
+    } else if (layer > 6.5) {
+        // Shadow, cast towards the south-east like the buildings'.
+        frame = 28.0;
+        p += vec2(0.11, 0.15) * s;
     } else {
         // Far: a small quad coloured by state, at least ~2.5 px wide.
         frame = 0.0;
@@ -411,6 +482,9 @@ void main() {
         v_pa = pa; v_pb = pb; v_pc = pc;
         return;
     }
+
+    // Whole pixels: the sprite's texels land on the buffer's pixels.
+    if (extra.x > 0.5) p = floor(p * params.z + 0.5) / params.z;
 
     // Sprite space: +x forward, +y to the right, metres from the body centre.
     vec2 l = corner * atlas.w;
@@ -449,6 +523,12 @@ uniform sampler2D atlas_tex;
 uniform sampler2D palette_tex;
 
 void main() {
+    if (v_dot > 1.5) {
+        // Shadow: depth-tested, so only its covered texels may write.
+        if (texture2D(atlas_tex, v_uv).a < 0.5) discard;
+        gl_FragColor = vec4(0.0, 0.0, 0.0, 0.3);
+        return;
+    }
     if (v_dot > 0.5) {
         gl_FragColor = v_flat;
         return;
@@ -457,7 +537,12 @@ void main() {
     vec3 a = texture2D(palette_tex, v_pa).rgb;
     vec3 b = texture2D(palette_tex, v_pb).rgb;
     vec3 c = texture2D(palette_tex, v_pc).rgb;
-    // Premultiplied: weights already carry coverage.
-    gl_FragColor = vec4(t.r * a + t.g * b + t.b * c, t.a) * v_flat.a;
+    // Premultiplied: weights already carry coverage. A weight of 0.8 is the
+    // palette colour itself (sprites::BASE); what the weights leave of the
+    // coverage goes to the outline colour, so shading bands shift towards
+    // it.
+    vec3 outline = vec3(0.09, 0.07, 0.11);
+    vec3 col = (t.r * a + t.g * b + t.b * c) * 1.25 + (t.a - t.r - t.g - t.b) * outline;
+    gl_FragColor = vec4(col, t.a) * v_flat.a;
 }
 "#;

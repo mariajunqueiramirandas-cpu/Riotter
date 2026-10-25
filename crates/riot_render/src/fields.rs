@@ -33,7 +33,7 @@ struct Uniforms {
     cam: [f32; 4],
     /// x0, y0, size, mode (0 hazards, 1 overlay)
     rect: [f32; 4],
-    /// time, unused ×3
+    /// time, metres per buffer pixel, unused ×2
     params: [f32; 4],
 }
 
@@ -309,7 +309,7 @@ impl FieldRenderer {
             ctx.apply_uniforms(UniformsSource::table(&Uniforms {
                 cam: cam.uniform(),
                 rect: [r.x, r.y, r.w, mode as f32],
-                params: [time, 0.0, 0.0, 0.0],
+                params: [time, 1.0 / cam.zoom.max(1e-3), 0.0, 0.0],
             }));
             ctx.draw(0, 6, 1);
             self.drawn += 1;
@@ -356,11 +356,13 @@ varying vec2 v_uv;
 varying vec2 v_world;
 varying float v_mode;
 varying float v_time;
+varying float v_px;
 void main() {
     vec2 w = rect.xy + corner * rect.z;
     v_world = w;
     v_mode = rect.w;
     v_time = params.x;
+    v_px = params.y;
     // Texel centres: the chunk spans texels 1..65 of 66.
     v_uv = (corner * 64.0 + 1.0) / 66.0;
     gl_Position = vec4((w - cam.xy) * cam.zw, 0.0, 1.0);
@@ -377,7 +379,17 @@ varying vec2 v_uv;
 varying vec2 v_world;
 varying float v_mode;
 varying float v_time;
+varying float v_px;
 uniform sampler2D field_tex;
+
+// Ordered dithering on a 4×4 Bayer matrix, anchored to the world's pixels.
+float bayer2(vec2 a) {
+    a = floor(a);
+    return fract(dot(a, vec2(0.5, a.y * 0.75)));
+}
+float bayer4(vec2 a) {
+    return bayer2(0.5 * a) * 0.25 + bayer2(a);
+}
 
 vec3 ramp(float v) {
     vec3 c0 = vec3(0.10, 0.12, 0.55);
@@ -408,9 +420,17 @@ void main() {
         c = vec3(0.30, 0.30, 0.32) * sa + c * (1.0 - sa);
         a = sa + a * (1.0 - sa);
         float f = clamp(t.b * 1.6, 0.0, 1.0);
-        // Fire glows: emissive light added on top.
-        c += vec3(1.0, 0.42, 0.08) * f * (0.75 + 0.25 * sin(time * 11.0 + v_world.x));
-        a = a + f * 0.3 * (1.0 - a);
+        // Pixel art: alpha in four steps, dithered between them, on the
+        // world's pixel grid (premultiplied colour follows).
+        vec2 cell = floor(v_world / v_px);
+        float q = clamp(floor(a * 4.0 + bayer4(cell)) / 4.0, 0.0, 1.0);
+        c = a > 0.001 ? c * (q / a) : vec3(0.0);
+        a = q;
+        // Fire glows: emissive light added on top, in steps too.
+        float fl = f * (0.75 + 0.25 * sin(time * 11.0 + floor(v_world.x)));
+        fl = floor(fl * 5.0 + bayer4(cell + 2.0)) / 5.0;
+        c += vec3(1.0, 0.42, 0.08) * fl;
+        a = a + fl * 0.3 * (1.0 - a);
         gl_FragColor = vec4(c, a);
     } else {
         float v = t.a;

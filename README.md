@@ -6,7 +6,11 @@ influence the crowd through organizers, objectives, stances, chants and
 supply drops, and every person decides what to do with that. The full design
 is in [DESIGN.md](DESIGN.md).
 
-![A riot at street level](docs/screenshots/close.png)
+![A march at street level](docs/screenshots/close.png)
+
+It is drawn as top-down pixel art: textured streets, roofs and parks, people,
+vehicles and props as sprites, all generated at start-up (see
+[Graphics](#graphics)).
 
 ## Quick start
 
@@ -48,10 +52,12 @@ crowd interprets; none of it is an order.
 | R, B, C | select the nearest organizer, have them broadcast the plan, chant |
 | Q, E | choose a supply (water, medic, shields, barricade material), drop it |
 | O, L, V, Tab, P | overlay (density, fear, anger, threat, gas, messages, cameras, pressure), level of detail, roofs, markers, phase timings |
+| K, J, N | pixel art on/off, pixel size 1×/2×, time-of-day light |
 | G, F, U, Y, PageUp | debug: gas, fire, spawn people, stamp threat, raise escalation |
 | F1, Esc | help, quit |
 
 `--tunables data/tunables.ron` reloads the tunables file while the game runs.
+`--pixel 2` doubles the size of the pixels; `--pixel 0` draws without pixel art.
 `--ticks N --screenshot out.png` simulates N ticks, renders and saves a PNG
 without a display (Xvfb works), which is how the screenshots in
 `docs/screenshots/` were made.
@@ -65,7 +71,7 @@ without a display (Xvfb works), which is how the screenshots in
 | `riot_sim` | the simulation: headless, deterministic, fixed 20 Hz tick, no allocation after warm-up. `RiotSetup` goes in, `RiotOutcome` comes out |
 | `riot_data` | Tiled JSON maps, the procedural city generator, RON scenarios and tunables |
 | `riot_headless` | batch runs, benchmarks, determinism and allocation checks, auto-resolve, PNG snapshots, map generation |
-| `riot_render` | instanced, layered sprites drawn from simulation snapshots, with level of detail and effects |
+| `riot_render` | procedural pixel art (people, materials, decals, props, vehicles) and the renderer: a pixel buffer at the art's density, instanced layered sprites from simulation snapshots, textured map meshes, shadows, effects |
 | `riot_app` | the window: the simulation on its own thread, input, HUD, hot reload |
 
 `data/` holds the maps, the scenarios and `tunables.ron`. See
@@ -78,6 +84,37 @@ without a display (Xvfb works), which is how the screenshots in
 | `standard_riot` | 1 km district | 10,000 | the benchmark; the march on parliament usually turns violent |
 | `mass_demonstration` | 8 km city | 50,000 | the stretch target |
 | `city_day` | 8 km city | 30,000 | 14 hours, internet shutdown at nine |
+
+## Graphics
+
+Everything on screen is pixel art painted by code when the game starts; there
+are no image files. Shapes are described in metres and rasterized with hard
+edges, banded shading and one-pixel outlines at four **art levels**: 48, 24,
+12 and 6 pixels per metre. The world is drawn into an offscreen buffer at the
+densest level that fits the zoom, with the camera snapped to whole pixels, so
+every texture and sprite is sampled texel for pixel; a sharp-bilinear filter
+scales the buffer to the screen, keeping pixels square at any zoom and
+scrolling smooth. Each level is its own pixel art, not a blurred copy of the
+one above it.
+
+- **People**: layered paper-doll sprites (body, accessory, head, held item)
+  in palette weights, so a few sheets give thousands of different people;
+  they rotate freely with their heading and cast a shadow.
+- **Map**: tileable materials (asphalt with cracks, pavement slabs, granite
+  kerbs, sandstone setts, grass, water, clay tiles, slate, gravel, bitumen,
+  corrugated metal, foliage) on meshes built from the map: kerbs and gutters
+  along every road, centre and lane lines, zebra crossings, manholes, drains,
+  stains, hipped roofs lit by facet, flat roofs behind parapets with air
+  conditioning, vents, skylights, solar panels, tanks and stair huts, tree
+  canopies and arcades.
+- **Props and vehicles**: parked cars in eight paints, burnt out or
+  overturned; bins, benches, crowd barriers, barricades, supply pallets;
+  police vans and ambulances with Battenburg markings and flashing light
+  bars, water cannon with a turret.
+- **Light**: shadows swept from buildings, trees, props, vehicles and people
+  towards the south-east, depth-tested so overlapping shadows never darken
+  twice; dithered gas and smoke; pixel flames and spray; a colour grade for
+  the time of day.
 
 ## Tests and checks
 

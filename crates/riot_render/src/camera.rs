@@ -24,8 +24,9 @@ pub enum Lod {
 impl Lod {
     /// Zoom (px/m) at and above which people are drawn as sprites.
     pub const MIDDLE_FROM: f32 = 1.6;
-    /// Zoom (px/m) at and above which people are drawn fully layered.
-    pub const CLOSE_FROM: f32 = 9.0;
+    /// Zoom (px/m) at and above which people are drawn fully layered: the
+    /// art level of 12 px/m, where a person is six pixels wide.
+    pub const CLOSE_FROM: f32 = 12.0;
 
     /// The automatic level of detail for a zoom.
     pub fn for_zoom(zoom: f32) -> Lod {
@@ -156,7 +157,7 @@ mod tests {
         assert!((c.screen_to_world(s) - p).length() < 1e-3);
         let anchor = vec2(100.0, 600.0);
         let before = c.screen_to_world(anchor);
-        c.zoom_at(2.5, anchor);
+        c.zoom_at(3.5, anchor);
         assert!((c.screen_to_world(anchor) - before).length() < 1e-3);
         assert_eq!(c.lod(), Lod::Close);
     }
