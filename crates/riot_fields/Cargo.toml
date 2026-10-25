@@ -1,0 +1,18 @@
+[package]
+name = "riot_fields"
+description = "Sparse 2 m field layers: density, emotions, threat, gas, fire, cameras, messages."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+riot_core.workspace = true
+riot_defs.workspace = true
+riot_map.workspace = true
+riot_people.workspace = true
+riot_spatial.workspace = true
+riot_team.workspace = true
+
+[lints]
+workspace = true

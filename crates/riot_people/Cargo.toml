@@ -1,0 +1,15 @@
+[package]
+name = "riot_people"
+description = "The agent table: 40 bytes of hot and warm state per person, plus cold data."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+riot_core.workspace = true
+riot_defs.workspace = true
+riot_team.workspace = true
+
+[lints]
+workspace = true

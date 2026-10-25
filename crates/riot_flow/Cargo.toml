@@ -1,0 +1,20 @@
+[package]
+name = "riot_flow"
+description = "Flow fields: two-level routing toward goals, built tile by tile with a fixed latency."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+riot_core.workspace = true
+riot_defs.workspace = true
+riot_fields.workspace = true
+riot_map.workspace = true
+riot_team.workspace = true
+
+[dev-dependencies]
+riot_testkit.workspace = true
+
+[lints]
+workspace = true

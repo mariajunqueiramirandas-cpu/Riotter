@@ -1,0 +1,19 @@
+[package]
+name = "riot_hazards"
+description = "Hazards: tear gas and smoke on the wind, fire, cameras, projectiles and the metro."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+riot_core.workspace = true
+riot_defs.workspace = true
+riot_fields.workspace = true
+riot_people.workspace = true
+riot_snapshot.workspace = true
+riot_spatial.workspace = true
+riot_world.workspace = true
+
+[lints]
+workspace = true

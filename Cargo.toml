@@ -4,6 +4,24 @@ members = ["crates/*"]
 default-members = [
     "crates/riot_core",
     "crates/riot_team",
+    "crates/riot_defs",
+    "crates/riot_snapshot",
+    "crates/riot_testkit",
+    "crates/riot_map",
+    "crates/riot_people",
+    "crates/riot_spatial",
+    "crates/riot_fields",
+    "crates/riot_flow",
+    "crates/riot_steer",
+    "crates/riot_physics",
+    "crates/riot_world",
+    "crates/riot_think",
+    "crates/riot_messages",
+    "crates/riot_hazards",
+    "crates/riot_interact",
+    "crates/riot_tactics",
+    "crates/riot_police",
+    "crates/riot_outcome",
     "crates/riot_sim",
     "crates/riot_data",
     "crates/riot_headless",
@@ -18,6 +36,24 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 riot_core = { path = "crates/riot_core" }
 riot_team = { path = "crates/riot_team" }
+riot_defs = { path = "crates/riot_defs" }
+riot_snapshot = { path = "crates/riot_snapshot" }
+riot_testkit = { path = "crates/riot_testkit" }
+riot_map = { path = "crates/riot_map" }
+riot_people = { path = "crates/riot_people" }
+riot_spatial = { path = "crates/riot_spatial" }
+riot_fields = { path = "crates/riot_fields" }
+riot_flow = { path = "crates/riot_flow" }
+riot_steer = { path = "crates/riot_steer" }
+riot_physics = { path = "crates/riot_physics" }
+riot_world = { path = "crates/riot_world" }
+riot_think = { path = "crates/riot_think" }
+riot_messages = { path = "crates/riot_messages" }
+riot_hazards = { path = "crates/riot_hazards" }
+riot_interact = { path = "crates/riot_interact" }
+riot_tactics = { path = "crates/riot_tactics" }
+riot_police = { path = "crates/riot_police" }
+riot_outcome = { path = "crates/riot_outcome" }
 riot_sim = { path = "crates/riot_sim" }
 riot_data = { path = "crates/riot_data" }
 riot_render = { path = "crates/riot_render" }
