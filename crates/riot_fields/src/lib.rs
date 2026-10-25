@@ -76,6 +76,18 @@ const fn bit(l: Layer) -> u16 {
     1 << l as u16
 }
 
+/// A layer (or a run of whole rows) as rows of `CC` cells: fixed-length
+/// rows let the row loops vectorize without bounds checks.
+#[inline(always)]
+fn rows(v: &[f32]) -> &[[f32; CC]] {
+    v.as_chunks::<CC>().0
+}
+
+#[inline(always)]
+fn rows_mut(v: &mut [f32]) -> &mut [[f32; CC]] {
+    v.as_chunks_mut::<CC>().0
+}
+
 /// Some value is not +0.0.
 #[inline]
 fn any_bits(v: &[f32]) -> bool {
@@ -550,18 +562,18 @@ impl Fields {
                         let s = table[(cy * cdim + x as u32) as usize];
                         if s == NO_SLOT { None } else { Some(s as usize) }
                     };
-                    let me = &data[(slot * LAYERS + li) * CL..][..CL];
-                    let left = nb(-1).map(|s| &data[(s * LAYERS + li) * CL..][..CL]);
-                    let right = nb(1).map(|s| &data[(s * LAYERS + li) * CL..][..CL]);
+                    let me = rows(&data[(slot * LAYERS + li) * CL..][..CL]);
+                    let left = nb(-1).map(|s| rows(&data[(s * LAYERS + li) * CL..][..CL]));
+                    let right = nb(1).map(|s| rows(&data[(s * LAYERS + li) * CL..][..CL]));
+                    let out = rows_mut(out);
                     let mut row = [0.0f32; CC + 4];
                     for y in 0..CC {
-                        let src = &me[y * CC..(y + 1) * CC];
-                        row[2..CC + 2].copy_from_slice(src);
-                        row[0] = left.map_or(0.0, |l| l[y * CC + CC - 2]);
-                        row[1] = left.map_or(0.0, |l| l[y * CC + CC - 1]);
-                        row[CC + 2] = right.map_or(0.0, |r| r[y * CC]);
-                        row[CC + 3] = right.map_or(0.0, |r| r[y * CC + 1]);
-                        let o = &mut out[y * CC..(y + 1) * CC];
+                        row[2..CC + 2].copy_from_slice(&me[y]);
+                        row[0] = left.map_or(0.0, |l| l[y][CC - 2]);
+                        row[1] = left.map_or(0.0, |l| l[y][CC - 1]);
+                        row[CC + 2] = right.map_or(0.0, |r| r[y][0]);
+                        row[CC + 3] = right.map_or(0.0, |r| r[y][1]);
+                        let o = &mut out[y];
                         for x in 0..CC {
                             o[x] = kx[0] * row[x]
                                 + kx[1] * row[x + 1]
@@ -594,16 +606,19 @@ impl Fields {
                     let s = table[(y as u32 * cdim + cx) as usize];
                     if s == NO_SLOT { None } else { Some(s as usize) }
                 };
-                let me = &tmp[slot * CL..][..CL];
-                let up = nb(-1).map(|s| &tmp[s * CL..][..CL]);
-                let down = nb(1).map(|s| &tmp[s * CL..][..CL]);
-                let at = |y: i32, x: usize| -> f32 {
+                let me = rows(&tmp[slot * CL..][..CL]);
+                let up = nb(-1).map(|s| rows(&tmp[s * CL..][..CL]));
+                let down = nb(1).map(|s| rows(&tmp[s * CL..][..CL]));
+                let zero = [0.0f32; CC];
+                // Row `y` of the row pass, from the chunks above and below
+                // past the edges (zeros where they are inactive).
+                let row = |y: i32| -> &[f32; CC] {
                     if y < 0 {
-                        up.map_or(0.0, |u| u[(CC as i32 + y) as usize * CC + x])
+                        up.map_or(&zero, |u| &u[(CC as i32 + y) as usize])
                     } else if y >= CC as i32 {
-                        down.map_or(0.0, |dn| dn[(y - CC as i32) as usize * CC + x])
+                        down.map_or(&zero, |dn| &dn[(y - CC as i32) as usize])
                     } else {
-                        me[y as usize * CC + x]
+                        &me[y as usize]
                     }
                 };
                 let (out, open): (&mut [f32], &[f32]) = if li < open_i {
@@ -613,28 +628,17 @@ impl Fields {
                     let (head, tail) = d.split_at_mut(li * CL);
                     (&mut tail[..CL], &head[open_i * CL..(open_i + 1) * CL])
                 };
+                let rows_out = rows_mut(out);
                 for y in 0..CC as i32 {
-                    if (2..CC as i32 - 2).contains(&y) {
-                        let r = |k: i32| &me[(y + k) as usize * CC..(y + k + 1) as usize * CC];
-                        let (a, b, c0, e, f) = (r(-2), r(-1), r(0), r(1), r(2));
-                        let o = &mut out[y as usize * CC..(y as usize + 1) * CC];
-                        for x in 0..CC {
-                            o[x] = decay
-                                * (ky[0] * a[x]
-                                    + ky[1] * b[x]
-                                    + ky[2] * c0[x]
-                                    + ky[3] * e[x]
-                                    + ky[4] * f[x]);
-                        }
-                    } else {
-                        for x in 0..CC {
-                            out[y as usize * CC + x] = decay
-                                * (ky[0] * at(y - 2, x)
-                                    + ky[1] * at(y - 1, x)
-                                    + ky[2] * at(y, x)
-                                    + ky[3] * at(y + 1, x)
-                                    + ky[4] * at(y + 2, x));
-                        }
+                    let (a, b, c0, e, f) = (row(y - 2), row(y - 1), row(y), row(y + 1), row(y + 2));
+                    let o = &mut rows_out[y as usize];
+                    for x in 0..CC {
+                        o[x] = decay
+                            * (ky[0] * a[x]
+                                + ky[1] * b[x]
+                                + ky[2] * c0[x]
+                                + ky[3] * e[x]
+                                + ky[4] * f[x]);
                     }
                 }
                 if mask_open {
@@ -678,16 +682,16 @@ impl Fields {
                     let (left, right) = (nb(-1), nb(1));
                     for (j, &l) in layers.iter().enumerate() {
                         let li = l as usize;
-                        let me = &data[(slot * LAYERS + li) * CL..][..CL];
-                        let o = &mut out[j * CL..(j + 1) * CL];
+                        let me = rows(&data[(slot * LAYERS + li) * CL..][..CL]);
+                        let left = left.map(|s| rows(&data[(s * LAYERS + li) * CL..][..CL]));
+                        let right = right.map(|s| rows(&data[(s * LAYERS + li) * CL..][..CL]));
+                        let o = rows_mut(&mut out[j * CL..(j + 1) * CL]);
                         let mut row = [0.0f32; CC + 2];
                         for y in 0..CC {
-                            row[1..CC + 1].copy_from_slice(&me[y * CC..(y + 1) * CC]);
-                            row[0] = left
-                                .map_or(0.0, |s| data[(s * LAYERS + li) * CL + y * CC + CC - 1]);
-                            row[CC + 1] =
-                                right.map_or(0.0, |s| data[(s * LAYERS + li) * CL + y * CC]);
-                            let o = &mut o[y * CC..(y + 1) * CC];
+                            row[1..CC + 1].copy_from_slice(&me[y]);
+                            row[0] = left.map_or(0.0, |l| l[y][CC - 1]);
+                            row[CC + 1] = right.map_or(0.0, |r| r[y][0]);
+                            let o = &mut o[y];
                             for x in 0..CC {
                                 o[x] = a * (row[x] + row[x + 2]) + c * row[x + 1];
                             }
@@ -717,29 +721,22 @@ impl Fields {
                 let (up, down) = (nb(-1), nb(1));
                 let zero = [0.0f32; CC];
                 for (j, &l) in layers.iter().enumerate() {
-                    let me = &tmp[(slot * FUSED + j) * CL..][..CL];
-                    let above = up.map_or(&zero[..], |s| {
-                        &tmp[(s * FUSED + j) * CL + (CC - 1) * CC..][..CC]
-                    });
-                    let below = down.map_or(&zero[..], |s| &tmp[(s * FUSED + j) * CL..][..CC]);
-                    let out = &mut d[l as usize * CL..(l as usize + 1) * CL];
+                    let me = rows(&tmp[(slot * FUSED + j) * CL..][..CL]);
+                    let above =
+                        up.map_or(&zero, |s| &rows(&tmp[(s * FUSED + j) * CL..][..CL])[CC - 1]);
+                    let below =
+                        down.map_or(&zero, |s| &rows(&tmp[(s * FUSED + j) * CL..][..CL])[0]);
+                    let out = rows_mut(&mut d[l as usize * CL..(l as usize + 1) * CL]);
                     for y in 0..CC {
-                        let r0 = if y > 0 {
-                            &me[(y - 1) * CC..y * CC]
-                        } else {
-                            above
-                        };
-                        let r1 = &me[y * CC..(y + 1) * CC];
-                        let r2 = if y + 1 < CC {
-                            &me[(y + 1) * CC..(y + 2) * CC]
-                        } else {
-                            below
-                        };
-                        let o = &mut out[y * CC..(y + 1) * CC];
+                        let r0 = if y > 0 { &me[y - 1] } else { above };
+                        let r1 = &me[y];
+                        let r2 = if y + 1 < CC { &me[y + 1] } else { below };
+                        let o = &mut out[y];
                         for x in 0..CC {
                             o[x] = a * (r0[x] + r2[x]) + c * r1[x];
                         }
                     }
+                    let out = out.as_flattened();
                     *live = (*live & !bit(l)) | if any_bits(out) { bit(l) } else { 0 };
                 }
             });
