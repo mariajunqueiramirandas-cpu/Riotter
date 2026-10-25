@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 riot_core.workspace = true
+riot_team.workspace = true
 rayon.workspace = true
 bytemuck.workspace = true
 libm.workspace = true

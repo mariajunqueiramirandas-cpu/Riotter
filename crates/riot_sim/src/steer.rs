@@ -1,11 +1,11 @@
 //! Phase 6: steering and facing (DESIGN §11.1). Reads positions, writes
 //! velocities and headings, each agent only its own.
 
-use rayon::prelude::*;
 use riot_core::lanes::{self, CHUNK_AGENTS};
 use riot_core::math::{heading_of, turn_toward, widen_u8};
 use riot_core::rng::{Stream, roll, unit};
 use riot_core::{Vec2, mix};
+use riot_team::prelude::*;
 
 use crate::archetype::{ARCHETYPES, Archetype, ArchetypeParams};
 use crate::fields::{Fields, Layer};

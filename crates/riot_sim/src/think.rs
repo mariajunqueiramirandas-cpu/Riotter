@@ -11,11 +11,11 @@
 //! - **Action-major batches**: the agents thinking this tick (per chunk) are
 //!   gathered into a scratch SoA and scored one action at a time.
 
-use rayon::prelude::*;
 use riot_core::lanes::{self, CHUNK_AGENTS};
 use riot_core::math::{narrow_u8, widen_u8};
 use riot_core::rng::{Stream, roll, unit};
 use riot_core::{Vec2, mix};
+use riot_team::prelude::*;
 
 use crate::archetype::{ARCHETYPES, Archetype, ArchetypeParams, Stance};
 use crate::fields::{Fields, Layer};

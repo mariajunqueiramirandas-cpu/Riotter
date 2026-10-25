@@ -1,7 +1,7 @@
 //! A warmed-up world ticks without touching the heap (DESIGN §16): every
 //! buffer is sized from the scenario's limits when the world is built.
 //!
-//! Only allocations made by the test thread and the simulation's own rayon
+//! Only allocations made by the test thread and the simulation's own team
 //! workers count, so the test harness cannot disturb the result.
 
 mod common;
@@ -49,17 +49,11 @@ static GLOBAL: Counting = Counting;
 
 #[test]
 fn ticks_do_not_allocate() {
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(4)
-        .start_handler(|_| COUNTED.with(|c| c.set(true)))
-        .build()
-        .unwrap();
+    let team = riot_team::Team::with_start(4, || COUNTED.with(|c| c.set(true)));
     let (map, setup) = common::violent(1500);
     let script = common::script(&map, 900);
     let mut w = World::new(&setup, &map, Tunables::default()).unwrap();
-    // Tick inside one `install`: rayon's injector grows a block every few
-    // dozen injected jobs, which is rayon's allocation, not the world's.
-    let worst = pool.install(|| {
+    let worst = riot_team::install(&team, || {
         // Warm up past the arrivals, the escalation, gas and fire, so every
         // pool and lazily built flow tile has been touched once.
         for _ in 0..1500 {

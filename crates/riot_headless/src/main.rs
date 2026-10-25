@@ -83,11 +83,28 @@ fn main() -> ExitCode {
     }
 }
 
-pub fn pool(threads: usize) -> rayon::ThreadPool {
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
-        .build()
-        .expect("thread pool")
+/// Threads for a run: rayon for building the world, the team for ticks.
+pub struct Pool {
+    rayon: rayon::ThreadPool,
+    team: riot_team::Team,
+}
+
+impl Pool {
+    /// Run `f` inside the rayon pool with the team installed.
+    pub fn install<R: Send>(&self, f: impl FnOnce() -> R + Send) -> R {
+        let team = &self.team;
+        self.rayon.install(|| riot_team::install(team, f))
+    }
+}
+
+pub fn pool(threads: usize) -> Pool {
+    Pool {
+        rayon: rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("thread pool"),
+        team: riot_team::Team::new(threads),
+    }
 }
 
 pub fn default_threads() -> usize {

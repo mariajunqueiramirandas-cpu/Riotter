@@ -21,9 +21,9 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
-use rayon::prelude::*;
 use riot_core::Vec2;
 use riot_core::math::HEADING_DIRS;
+use riot_team::prelude::*;
 
 use crate::fields::{Fields, Layer};
 use crate::map::{BLOCKED, Map, REGION, TILE, TILE_M};

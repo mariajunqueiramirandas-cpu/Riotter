@@ -8,10 +8,10 @@
 //! keeps the single-writer rule, and results do not depend on order or
 //! thread count.
 
-use rayon::prelude::*;
 use riot_core::lanes::{self, CHUNK_AGENTS};
 use riot_core::math::{closest_on_segment, narrow_u8, segment_hit, widen_u8};
 use riot_core::{Buckets, Vec2};
+use riot_team::prelude::*;
 
 use crate::archetype::{ARCHETYPES, ArchetypeParams};
 use crate::event::Event;
@@ -151,12 +151,10 @@ pub struct PhysScratch {
     pub press: Vec<f32>,
     /// Peak pressure of the last tick (0..1): raises iterations when high.
     pub peak: f32,
-    pub partial_peak: Vec<f32>,
 }
 
 impl PhysScratch {
     pub fn new(cap: usize) -> Self {
-        let chunks = cap / CHUNK_AGENTS;
         PhysScratch {
             qx: vec![0.0; cap],
             qy: vec![0.0; cap],
@@ -164,7 +162,6 @@ impl PhysScratch {
             y0: vec![0.0; cap],
             press: vec![0.0; cap],
             peak: 0.0,
-            partial_peak: Vec::with_capacity(chunks),
         }
     }
 }
@@ -328,8 +325,8 @@ pub fn move_bodies(p: &mut People, s: &mut PhysScratch, events: &mut [Vec<Event>
     let baseline = tun.pressure_baseline;
     let smooth = tun.pressure_smoothing.clamp(0.0, 1.0);
     let (sleep_speed, sleep_ticks) = (tun.sleep_speed, tun.sleep_ticks.clamp(1.0, 255.0) as u8);
-    s.partial_peak.clear();
-    px.par_chunks_mut(CHUNK_AGENTS)
+    s.peak = px
+        .par_chunks_mut(CHUNK_AGENTS)
         .zip(py.par_chunks_mut(CHUNK_AGENTS))
         .zip(
             vx.par_chunks_mut(CHUNK_AGENTS)
@@ -467,8 +464,7 @@ pub fn move_bodies(p: &mut People, s: &mut PhysScratch, events: &mut [Vec<Event>
             }
             peak
         })
-        .collect_into_vec(&mut s.partial_peak);
-    s.peak = s.partial_peak.iter().fold(0.0f32, |a, &b| a.max(b));
+        .reduce(|| 0.0f32, f32::max);
 }
 
 #[cfg(test)]

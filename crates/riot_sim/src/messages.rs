@@ -11,11 +11,11 @@
 //! few ticks, and phones deliver the latest broadcast until the internet is
 //! shut down. Following a message is still a choice, made in think.
 
-use rayon::prelude::*;
 use riot_core::grid::demorton2;
 use riot_core::lanes::{self, CHUNK_AGENTS};
 use riot_core::rng::{Stream, roll, roll_key, unit};
 use riot_core::{StateHasher, Vec2};
+use riot_team::prelude::*;
 
 use crate::archetype::{ARCHETYPES, Archetype, ArchetypeParams, Stance};
 use crate::fields::{CC, CL, Fields, Layer, NO_CHUNK, NO_SLOT};

@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/riot_core",
+    "crates/riot_team",
     "crates/riot_sim",
     "crates/riot_data",
     "crates/riot_headless",
@@ -10,6 +11,7 @@ members = [
 ]
 default-members = [
     "crates/riot_core",
+    "crates/riot_team",
     "crates/riot_sim",
     "crates/riot_data",
     "crates/riot_headless",
@@ -23,6 +25,7 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 riot_core = { path = "crates/riot_core" }
+riot_team = { path = "crates/riot_team" }
 riot_sim = { path = "crates/riot_sim" }
 riot_data = { path = "crates/riot_data" }
 riot_render = { path = "crates/riot_render" }

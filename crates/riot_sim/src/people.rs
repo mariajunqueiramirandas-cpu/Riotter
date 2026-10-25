@@ -14,9 +14,9 @@
 //! | `stable_id` u32 | 4 |
 //! | `aux` u32: 24-bit target + 8-bit stillness counter | 4 |
 
-use rayon::prelude::*;
 use riot_core::Vec2;
 use riot_core::lanes::{self, CHUNK_AGENTS, F32x8};
+use riot_team::prelude::*;
 
 use crate::state::{aux, flag, stat};
 

@@ -5,11 +5,11 @@
 //! are then resolved sequentially in chunk order: conflicts, such as two
 //! officers grabbing the same person, are settled by that order.
 
-use rayon::prelude::*;
 use riot_core::Vec2;
 use riot_core::lanes::{self, CHUNK_AGENTS};
 use riot_core::math::{narrow_u8, widen_u8};
 use riot_core::rng::{Stream, roll, roll_key, unit};
+use riot_team::prelude::*;
 
 use crate::archetype::Archetype;
 use crate::event::Event;

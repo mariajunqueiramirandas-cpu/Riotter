@@ -1,6 +1,6 @@
 //! The same inputs give the same state on every tick whatever the thread
-//! count (DESIGN §3.1): work is split into fixed chunks and reduced in a
-//! fixed order, never by how rayon happens to schedule it.
+//! count (DESIGN §3.1): work is split into fixed chunks, each chunk's result
+//! depends only on its own index, and reductions are exact.
 
 mod common;
 
@@ -8,12 +8,9 @@ use riot_sim::testkit;
 use riot_sim::{MapDef, RiotSetup, Tunables, World};
 
 fn hashes(map: &MapDef, setup: &RiotSetup, threads: usize, ticks: u32, script_at: u32) -> Vec<u64> {
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
-        .build()
-        .unwrap();
+    let team = riot_team::Team::new(threads);
     let script = common::script(map, script_at);
-    pool.install(|| {
+    riot_team::install(&team, || {
         let mut w = World::new(setup, map, Tunables::default()).unwrap();
         let h = (0..ticks)
             .map(|_| {

@@ -1,9 +1,9 @@
 //! Phase 11b: the render snapshot (DESIGN §18.1). People are gathered
 //! through `slot_of` into `stable_id` order, in parallel over output chunks.
 
-use rayon::prelude::*;
 use riot_core::lanes;
 use riot_core::math::{narrow_u8, widen_u8};
+use riot_team::prelude::*;
 
 use crate::archetype::Archetype;
 use crate::fields::{CC, CL, Layer, NO_CHUNK};

@@ -11,10 +11,10 @@
 //!   cell with a two-pass radix sort, so each cell's agents are a contiguous
 //!   run and field scatters become segmented reductions (DESIGN §8).
 
-use rayon::prelude::*;
 use riot_core::grid::{GridGeom, morton2};
 use riot_core::lanes::{self, CHUNK_AGENTS};
 use riot_core::{Buckets, RadixSort24};
+use riot_team::prelude::*;
 
 use crate::archetype::{ARCHETYPES, ArchetypeParams};
 use crate::people::People;

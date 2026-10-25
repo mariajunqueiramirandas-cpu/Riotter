@@ -1,7 +1,7 @@
 //! Riotter's window and input (DESIGN §4.1, §18.3).
 //!
 //! macroquad provides the window, input and debug drawing; `riot_render`
-//! draws snapshots; the simulation runs on its own thread and rayon pool
+//! draws snapshots; the simulation runs on its own thread and thread team
 //! ([`sim_thread`]). Every player action becomes a command stamped with a
 //! tick ([`input`]); tunables reload from a file ([`hotreload`]).
 //!

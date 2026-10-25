@@ -8,12 +8,12 @@
 //! or an emitter, or its values have not decayed yet. Cost and memory follow
 //! the area where something is happening, not the size of the map.
 
-use rayon::prelude::*;
 use riot_core::Vec2;
 use riot_core::grid::{GridGeom, demorton2};
 use riot_core::lanes::{self, CHUNK_AGENTS};
 use riot_core::math::{dither_u8, widen_u8};
 use riot_core::rng::{Stream, roll, unit};
+use riot_team::prelude::*;
 
 use crate::archetype::{ARCHETYPES, Archetype, ArchetypeParams};
 use crate::map::Map;

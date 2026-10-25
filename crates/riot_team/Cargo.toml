@@ -1,0 +1,12 @@
+[package]
+name = "riot_team"
+description = "A spinning fork-join thread team for the riot simulation's tick."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -36,12 +36,7 @@ fn percentile(v: &mut [f64], p: f64) -> f64 {
 }
 
 /// Run `ticks` ticks after `warmup`, returning per-tick per-phase ms.
-pub fn measure(
-    w: &mut World,
-    pool: &rayon::ThreadPool,
-    warmup: u32,
-    ticks: u32,
-) -> Vec<[f64; PHASES]> {
+pub fn measure(w: &mut World, pool: &crate::Pool, warmup: u32, ticks: u32) -> Vec<[f64; PHASES]> {
     // One `install` for the whole run: the simulation thread stays inside the
     // pool, as it does in the app (DESIGN §12 thread pool).
     pool.install(|| {

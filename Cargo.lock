@@ -371,10 +371,10 @@ name = "riot_app"
 version = "0.1.0"
 dependencies = [
  "macroquad",
- "rayon",
  "riot_data",
  "riot_render",
  "riot_sim",
+ "riot_team",
 ]
 
 [[package]]
@@ -404,6 +404,7 @@ dependencies = [
  "riot_core",
  "riot_data",
  "riot_sim",
+ "riot_team",
 ]
 
 [[package]]
@@ -422,7 +423,12 @@ dependencies = [
  "libm",
  "rayon",
  "riot_core",
+ "riot_team",
 ]
+
+[[package]]
+name = "riot_team"
+version = "0.1.0"
 
 [[package]]
 name = "ron"

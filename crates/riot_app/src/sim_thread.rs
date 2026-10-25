@@ -1,6 +1,6 @@
 //! The simulation thread (DESIGN §2.8, §4.2, §12).
 //!
-//! The `World` lives on its own thread and ticks on a dedicated rayon pool
+//! The `World` lives on its own thread and ticks on a dedicated thread team
 //! of (cores − 1) threads, leaving the main thread free for input and
 //! rendering. A fixed-tick accumulator runs 20 ticks per real second times
 //! the game speed; speed never changes the tick length. Every input reaches
@@ -103,12 +103,8 @@ impl SimHandle {
         let join = std::thread::Builder::new()
             .name("sim".into())
             .spawn(move || {
-                let pool = rayon::ThreadPoolBuilder::new()
-                    .num_threads(threads)
-                    .thread_name(|i| format!("sim-pool-{i}"))
-                    .build()
-                    .expect("simulation thread pool");
-                SimLoop::new(world, rx, sh, speed, paused).run(&pool);
+                let team = riot_team::Team::new(threads);
+                SimLoop::new(world, rx, sh, speed, paused).run(&team);
             })
             .expect("simulation thread");
         SimHandle {
@@ -315,7 +311,7 @@ impl SimLoop {
         }
     }
 
-    fn tick(&mut self, pool: &rayon::ThreadPool) {
+    fn tick(&mut self, team: &riot_team::Team) {
         let now = self.world.tick;
         self.cmds.clear();
         for k in self.pending.drain(..) {
@@ -332,7 +328,7 @@ impl SimLoop {
         }
         let t0 = Instant::now();
         let (world, cmds, timer) = (&mut self.world, &self.cmds, &mut self.timer);
-        pool.install(|| world.tick_profiled(cmds, timer));
+        riot_team::install(team, || world.tick_profiled(cmds, timer));
         self.window_time += t0.elapsed().as_secs_f64();
         self.window_ticks += 1;
     }
@@ -379,7 +375,7 @@ impl SimLoop {
         }
     }
 
-    fn run(mut self, pool: &rayon::ThreadPool) {
+    fn run(mut self, team: &riot_team::Team) {
         let rate = TICK_HZ as f64;
         let mut last = Instant::now();
         loop {
@@ -394,7 +390,7 @@ impl SimLoop {
                 // Headless: as fast as possible, publishing every batch.
                 let n = self.fast_forward.min(32);
                 for _ in 0..n {
-                    self.tick(pool);
+                    self.tick(team);
                 }
                 self.fast_forward -= n;
                 ran += n;
@@ -409,12 +405,12 @@ impl SimLoop {
                 self.behind = self.acc > cap;
                 self.acc = self.acc.min(cap);
                 while self.acc >= 1.0 {
-                    self.tick(pool);
+                    self.tick(team);
                     self.acc -= 1.0;
                     ran += 1;
                 }
                 while self.steps > 0 {
-                    self.tick(pool);
+                    self.tick(team);
                     self.steps -= 1;
                     ran += 1;
                 }

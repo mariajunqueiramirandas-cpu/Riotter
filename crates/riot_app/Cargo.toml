@@ -8,10 +8,10 @@ license.workspace = true
 
 [dependencies]
 riot_sim.workspace = true
+riot_team.workspace = true
 riot_render.workspace = true
 riot_data.workspace = true
 macroquad.workspace = true
-rayon.workspace = true
 
 [lints]
 workspace = true
