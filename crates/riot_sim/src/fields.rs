@@ -946,6 +946,7 @@ pub fn absorb(f: &Fields, p: &mut People, sp: &Spatial, ap: &AbsorbParams) -> Ab
                     fatigue += tun.gas_fatigue * g * if officer { 0.25 } else { 1.0 };
                     if !officer {
                         gas_harm = tun.gas_damage * g;
+                        morale -= tun.gas_morale * g;
                     }
                     if gas > 0.3 {
                         ss[k][stat::FLAGS] |= flag::URGENT;
@@ -953,7 +954,9 @@ pub fn absorb(f: &Fields, p: &mut People, sp: &Spatial, ap: &AbsorbParams) -> Ab
                 }
                 let fire = pr.get(f, Layer::Fire);
                 if fire > 0.05 {
-                    harm += tun.fire_damage * fire;
+                    // The sampled field bleeds a cell past the flames: it
+                    // frightens there, but only burns inside them.
+                    harm += tun.fire_damage * ((fire - 0.3) * (1.0 / 0.7)).max(0.0);
                     fear += 0.05 * fire;
                     ss[k][stat::FLAGS] |= flag::URGENT;
                 }

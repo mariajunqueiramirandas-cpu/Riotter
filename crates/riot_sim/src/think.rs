@@ -179,10 +179,12 @@ fn considerations(a: Action) -> &'static [(Input, Curve)] {
         (Fear, f(0.2, 1.0, 1.0)),
     ];
     const GO_HOME: &[(Input, Curve)] = &[
+        // Replaced when the minds are built by a step down through the
+        // `leave_morale` tunable: people go home once their morale breaks.
         (Morale, f(0.0, 1.0, 3.0)),
-        (Fatigue, r(0.2, 1.0, 2.0)),
-        (Late, r(0.3, 1.0, 2.0)),
-        (Injury, r(0.5, 1.0, 1.0)),
+        (Fatigue, r(0.6, 1.0, 1.0)),
+        (Late, r(0.7, 1.0, 1.0)),
+        (Injury, r(0.7, 1.0, 1.0)),
     ];
     const IDLE: &[(Input, Curve)] = &[(Plan, f(0.3, 1.0, 1.0))];
     match a {
@@ -206,28 +208,28 @@ fn considerations(a: Action) -> &'static [(Input, Curve)] {
 const WEIGHTS: [[f32; CIVILIAN_ACTIONS]; ARCHETYPES] = [
     // march hold flee rest seek help film throw barr chant home idle
     [
-        1.00, 0.90, 1.00, 0.30, 0.30, 0.25, 0.10, 0.45, 0.35, 0.00, 0.30, 0.08,
+        1.00, 0.90, 1.00, 0.30, 0.30, 0.25, 0.10, 0.45, 0.35, 0.00, 1.00, 0.08,
     ], // student
     [
-        1.00, 0.85, 1.00, 0.35, 0.30, 0.30, 0.05, 0.35, 0.30, 0.00, 0.35, 0.08,
+        1.00, 0.85, 1.00, 0.35, 0.30, 0.30, 0.05, 0.35, 0.30, 0.00, 1.00, 0.08,
     ], // worker
     [
-        0.90, 0.80, 1.20, 0.60, 0.40, 0.20, 0.02, 0.02, 0.02, 0.00, 0.60, 0.10,
+        0.90, 0.80, 1.20, 0.60, 0.40, 0.20, 0.02, 0.02, 0.02, 0.00, 1.20, 0.10,
     ], // elder
     [
-        1.00, 1.00, 0.80, 0.25, 0.25, 0.15, 0.05, 1.00, 0.80, 0.00, 0.20, 0.05,
+        1.00, 1.00, 0.80, 0.25, 0.25, 0.15, 0.05, 1.00, 0.80, 0.00, 0.70, 0.05,
     ], // radical
     [
-        1.10, 1.00, 0.70, 0.20, 0.20, 0.35, 0.05, 0.00, 0.00, 1.50, 0.05, 0.05,
+        1.10, 1.00, 0.70, 0.20, 0.20, 0.35, 0.05, 0.00, 0.00, 1.50, 0.30, 0.05,
     ], // organizer
     [
         0.80, 0.70, 0.60, 0.10, 0.10, 0.00, 0.00, 1.50, 0.70, 0.00, 0.05, 0.10,
     ], // provocateur
     [
-        0.15, 0.10, 1.00, 0.20, 0.20, 0.10, 1.20, 0.00, 0.00, 0.00, 0.20, 0.30,
+        0.15, 0.10, 1.00, 0.20, 0.20, 0.10, 1.20, 0.00, 0.00, 0.00, 0.60, 0.30,
     ], // journalist
     [
-        0.20, 0.10, 1.30, 0.30, 0.20, 0.15, 0.40, 0.02, 0.01, 0.00, 0.50, 0.60,
+        0.20, 0.10, 1.30, 0.30, 0.20, 0.15, 0.40, 0.02, 0.01, 0.00, 1.20, 0.60,
     ], // bystander
     [0.0; CIVILIAN_ACTIONS],
     [0.0; CIVILIAN_ACTIONS],
@@ -246,7 +248,7 @@ pub struct Minds {
 }
 
 impl Minds {
-    pub fn new(_cap: usize) -> Self {
+    pub fn new(_cap: usize, tun: &Tunables) -> Self {
         let mut luts = Vec::with_capacity(CIVILIAN_ACTIONS);
         let mut lut_input = Vec::with_capacity(CIVILIAN_ACTIONS);
         let mut lut_n = Vec::with_capacity(CIVILIAN_ACTIONS);
@@ -262,13 +264,22 @@ impl Minds {
             lut_input.push(ins);
             lut_n.push(cons.len().min(MAX_CONS) as u8);
         }
-        Minds {
+        let mut m = Minds {
             luts,
             lut_input,
             lut_n,
             weights: WEIGHTS,
             thought: 0,
-        }
+        };
+        m.retune(tun);
+        m
+    }
+
+    /// Rebuild the tables that depend on tunables.
+    pub fn retune(&mut self, tun: &Tunables) {
+        let lm = tun.leave_morale;
+        self.luts[Action::GoHome as usize][0] =
+            s(lm + 0.1, (lm - 0.08).max(0.0), 0.02, 1.0).table();
     }
 
     /// Nothing per dense index lives here, so a reorder changes nothing.

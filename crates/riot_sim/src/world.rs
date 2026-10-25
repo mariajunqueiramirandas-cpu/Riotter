@@ -455,7 +455,7 @@ impl World {
             stance: Stance::Peaceful,
             supplies_left: setup.supplies,
             msgs: Messages::new(),
-            minds: Minds::new(cap),
+            minds: Minds::new(cap, &tun),
             police: Police::new(setup, &map, cap, max_people)?,
             hazards: Hazards::new(setup),
             officer_targets: vec![OfficerTarget::default(); officers.max(1)],
@@ -643,6 +643,7 @@ impl World {
                 }
                 CommandKind::SetTunable { id, value } => {
                     self.tun.set(id, value);
+                    self.minds.retune(&self.tun);
                 }
                 CommandKind::Debug(d) => self.debug_command(d),
             }

@@ -241,8 +241,8 @@ fn emit(w: &mut World) {
                             if (ent.pos - pos).len2() > r * r {
                                 continue;
                             }
-                            let leaving = act == Action::GoHome
-                                || act == Action::Flee && a == Archetype::Bystander;
+                            // Whoever has fled all the way to a way out takes it.
+                            let leaving = act == Action::GoHome || act == Action::Flee;
                             let metro = act == Action::March && ent.kind == EntryKind::Metro && {
                                 let slot = intent::objective(p.intent[i]);
                                 objectives
@@ -567,6 +567,10 @@ pub fn damage(w: &mut World, i: usize, amount: u8, by: u32, cause: Harm) {
     let s = w.people.stable_id[i] as usize;
     w.cold[s].hits = w.cold[s].hits.saturating_add(1);
     w.cold[s].last_harm = cause as u8;
+    if !officer && by != u32::MAX {
+        let m = &mut w.people.emo[i][emo::MORALE];
+        *m = m.saturating_sub(narrow_u8(w.tun.hit_morale));
+    }
     if by != u32::MAX && (by as usize) < w.police.officers.len() {
         // Hit by the police: anger and fear.
         let e = &mut w.people.emo[i];

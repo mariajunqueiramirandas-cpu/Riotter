@@ -167,7 +167,7 @@
     "fire_spread": 0.03,
     // Fuel burnt per tick per burning cell.
     "fire_burn": 2.0,
-    // Health lost per tick standing in full fire.
+    // Health lost per tick standing in full fire (nothing below 0.3 of it).
     "fire_damage": 0.0015,
     // Ticks a metro ride takes.
     "metro_delay": 3600.0,
@@ -177,6 +177,10 @@
     "exit_radius": 4.0,
     // Morale under which people consider going home.
     "leave_morale": 0.18,
+    // Morale lost per tick per unit of gas (protesters).
+    "gas_morale": 0.0004,
+    // Morale lost to each blow or projectile that lands on a protester.
+    "hit_morale": 0.05,
     // How far a camera sees (m).
     "camera_radius": 25.0,
 }

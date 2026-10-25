@@ -208,12 +208,14 @@ fn gas_clears_a_crowd() {
     assert!(after * 2 <= before, "{before} → {after}");
 }
 
-/// Calling everyone to one spot crushes people (DESIGN §2.6).
+/// Calling everyone to one spot crushes people (DESIGN §2.6). Two minutes:
+/// the panicked at the edge of the crowd can get away through the entry,
+/// so the pressure in the middle takes a while to hurt people.
 #[test]
 fn calling_everyone_to_one_spot_crushes() {
     let (map, setup) = testkit::crush(3000, 3);
     let mut w = World::new(&setup, &map, Tunables::default()).unwrap();
-    for _ in 0..1200 {
+    for _ in 0..2400 {
         w.tick(&[]);
     }
     let fallen = (0..w.people.len)
@@ -225,8 +227,8 @@ fn calling_everyone_to_one_spot_crushes() {
         "injuries {} fallen {fallen} deaths {} crush harm {crush}",
         o.injuries, o.deaths
     );
-    // A crush: pressure knocks hundreds down within a minute and injures
-    // dozens, and the harm is crowd pressure, not anything else.
+    // A crush: pressure knocks hundreds down and injures dozens, and the
+    // harm is crowd pressure, not anything else.
     assert!(fallen > 200, "only {fallen} fell");
     assert!(o.injuries > 30, "only {} injured", o.injuries);
     assert!(crush > o.harm.iter().sum::<u32>() / 2, "harm {:?}", o.harm);

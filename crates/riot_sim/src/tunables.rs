@@ -122,11 +122,13 @@ tunables! {
     water_range = 25.0, "Water cannon reach (m).";
     fire_spread = 0.03, "Per-tick chance fire spreads to a neighbouring fuel cell.";
     fire_burn = 2.0, "Fuel burnt per tick per burning cell.";
-    fire_damage = 0.0015, "Health lost per tick standing in full fire.";
+    fire_damage = 0.0015, "Health lost per tick standing in full fire (nothing below 0.3 of it).";
     metro_delay = 3600.0, "Ticks a metro ride takes.";
     hold_density = 0.4, "Protesters per m² that count as holding an objective.";
     exit_radius = 4.0, "Distance from an exit at which leaving people disappear (m).";
     leave_morale = 0.18, "Morale under which people consider going home.";
+    gas_morale = 0.0004, "Morale lost per tick per unit of gas (protesters).";
+    hit_morale = 0.05, "Morale lost to each blow or projectile that lands on a protester.";
     camera_radius = 25.0, "How far a camera sees (m).";
 }
 
