@@ -124,10 +124,9 @@ pub struct Map {
     pub tile_rc0: Vec<u8>,
     pub mixed: Vec<MixedTile>,
     pub labels: Vec<[u8; 256]>,
-    pub seg_ax: Vec<f32>,
-    pub seg_ay: Vec<f32>,
-    pub seg_bx: Vec<f32>,
-    pub seg_by: Vec<f32>,
+    /// Wall segments: the solids' edges, then the map frame. One record per
+    /// segment, so a lookup reads one 16-byte slot.
+    pub segs: Vec<Seg>,
     pub wall_idx: Vec<u32>,
     pub region_first: Vec<u32>,
     pub rnodes: Vec<RegionNode>,
@@ -161,9 +160,11 @@ impl std::fmt::Display for MapError {
 
 impl std::error::Error for MapError {}
 
-struct Seg {
-    a: Vec2,
-    b: Vec2,
+/// A wall segment from `a` to `b`.
+#[derive(Clone, Copy, Debug)]
+pub struct Seg {
+    pub a: Vec2,
+    pub b: Vec2,
 }
 
 impl Map {
@@ -503,10 +504,7 @@ impl Map {
             tile_rc0: Vec::new(),
             mixed,
             labels,
-            seg_ax: segs.iter().map(|s| s.a.x).collect(),
-            seg_ay: segs.iter().map(|s| s.a.y).collect(),
-            seg_bx: segs.iter().map(|s| s.b.x).collect(),
-            seg_by: segs.iter().map(|s| s.b.y).collect(),
+            segs,
             wall_idx,
             region_first: Vec::new(),
             rnodes: Vec::new(),
@@ -712,7 +710,9 @@ impl Map {
     }
 
     /// Wall segments near a point: the list of the 4 m sub-cell containing it.
-    #[inline]
+    /// Always inlined: bodies and steering call it about five times per
+    /// person per tick, and inlined the map's fields stay in registers.
+    #[inline(always)]
     pub fn walls_near(&self, p: Vec2) -> &[u32] {
         let fx = (p.x + self.half) * (1.0 / 4.0);
         let fy = (p.y + self.half) * (1.0 / 4.0);
@@ -733,13 +733,10 @@ impl Map {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn segment(&self, s: u32) -> (Vec2, Vec2) {
-        let s = s as usize;
-        (
-            Vec2::new(self.seg_ax[s], self.seg_ay[s]),
-            Vec2::new(self.seg_bx[s], self.seg_by[s]),
-        )
+        let seg = self.segs[s as usize];
+        (seg.a, seg.b)
     }
 
     /// Does the straight segment `a → b` cross a wall? Walks the 4 m
@@ -1060,7 +1057,7 @@ impl Map {
             + self.tile_rc0.len()
             + self.mixed.len() * std::mem::size_of::<MixedTile>()
             + self.labels.len() * 256
-            + self.seg_ax.len() * 16
+            + self.segs.len() * std::mem::size_of::<Seg>()
             + self.wall_idx.len() * 4
             + self.rnodes.len() * std::mem::size_of::<RegionNode>()
             + self.radj.len() * 8

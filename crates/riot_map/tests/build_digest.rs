@@ -38,8 +38,8 @@ fn digest(m: &Map) -> u64 {
     for l in &m.labels {
         h.write_bytes(l);
     }
-    h.write_u64(m.seg_ax.len() as u64);
-    for s in 0..m.seg_ax.len() as u32 {
+    h.write_u64(m.segs.len() as u64);
+    for s in 0..m.segs.len() as u32 {
         let (a, b) = m.segment(s);
         for x in [a.x, a.y, b.x, b.y] {
             h.write_f32(x);
