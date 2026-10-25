@@ -172,6 +172,8 @@ pub struct FlowSystem {
     /// Requests and usage from steering, one buffer per agent chunk.
     pub records: Vec<Vec<u64>>,
     pub stats: FlowStats,
+    /// Step costs of one goal's pages, in page-list order.
+    step_scratch: Vec<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -243,6 +245,7 @@ impl FlowSystem {
             merged: Vec::with_capacity(agent_chunks * 512),
             records: (0..agent_chunks).map(|_| Vec::with_capacity(512)).collect(),
             stats: FlowStats::default(),
+            step_scratch: vec![TILE_STEP; pages * PAGE_TILES],
         }
     }
 
@@ -846,18 +849,33 @@ impl FlowSystem {
     fn tile_dijkstra(&mut self, map: &Map, fields: &Fields, tun: &Tunables, g: u8) {
         let gi = g as usize;
         let epoch = self.goals[gi].version;
-        for &p in &self.goals[gi].page_list {
+        // Step costs, one page per task (a pure function of the fields),
+        // into scratch in page-list order, then into place.
+        {
+            let n = self.goals[gi].page_list.len();
+            let page_list = &self.goals[gi].page_list;
+            let page_region = &self.page_region;
+            self.step_scratch[..n * PAGE_TILES]
+                .par_chunks_mut(PAGE_TILES)
+                .enumerate()
+                .for_each(|(k, out)| {
+                    let r = page_region[page_list[k] as usize];
+                    let (rx, ry) = (r % map.rdim, r / map.rdim);
+                    for (local, o) in out.iter_mut().enumerate() {
+                        let local = local as u32;
+                        let t = map
+                            .tile_index(rx * REGION + local % REGION, ry * REGION + local / REGION);
+                        *o = tile_step_cost(map, fields, tun, t, g < GOAL_POLICE);
+                    }
+                });
+        }
+        for (k, &p) in self.goals[gi].page_list.iter().enumerate() {
             let (a, b) = (p as usize * PAGE_COST, (p as usize + 1) * PAGE_COST);
             self.page_prev[a..b].copy_from_slice(&self.page_cost[a..b]);
             self.page_cost[a..b].fill(INF);
             self.page_anchor[a..b].fill(NONE);
-            let r = self.page_region[p as usize];
-            let (rx, ry) = (r % map.rdim, r / map.rdim);
-            for local in 0..PAGE_TILES as u32 {
-                let t = map.tile_index(rx * REGION + local % REGION, ry * REGION + local / REGION);
-                self.page_step[p as usize * PAGE_TILES + local as usize] =
-                    tile_step_cost(map, fields, tun, t, g < GOAL_POLICE);
-            }
+            self.page_step[p as usize * PAGE_TILES..(p as usize + 1) * PAGE_TILES]
+                .copy_from_slice(&self.step_scratch[k * PAGE_TILES..(k + 1) * PAGE_TILES]);
         }
         let goal = &self.goals[gi];
         let page_cost = &mut self.page_cost;
@@ -1158,13 +1176,16 @@ fn toward(map: &Map, tx: u32, ty: u32, a: Vec2) -> Option<(i32, i32)> {
 /// Cost of entering tile `t`: its length plus crowd, gas and fire penalties,
 /// and, for everyone but the police (who open their own), police barriers
 /// across it.
+#[inline(always)]
 fn tile_step_cost(map: &Map, fields: &Fields, tun: &Tunables, t: u32, barriers: bool) -> u32 {
     let (tx, ty) = (t & (map.tdim - 1), t >> map.tshift);
     let cx = tx as f32 * TILE_M - map.half + TILE_M * 0.5;
     let cy = ty as f32 * TILE_M - map.half + TILE_M * 0.5;
-    let dens = fields.sample(Layer::Dens, cx, cy);
-    let gas = fields.sample(Layer::Gas, cx, cy);
-    let fire = fields.sample(Layer::Fire, cx, cy);
+    // `Fields::sample` of each layer, with the probe located once.
+    let pr = fields.probe(cx, cy);
+    let dens = pr.get(fields, Layer::Dens);
+    let gas = pr.get(fields, Layer::Gas);
+    let fire = pr.get(fields, Layer::Fire);
     let pen = (tun.flow_density_cost * dens + tun.flow_gas_cost * gas + tun.flow_fire_cost * fire)
         .clamp(0.0, MAX_SOFT_PEN)
         + if barriers {
