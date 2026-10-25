@@ -170,10 +170,25 @@ pub fn vnoise(u: f32, v: f32, period: i32, seed: u32) -> f32 {
     let (fx, fy) = (x - x0, y - y0);
     let s = |t: f32| t * t * (3.0 - 2.0 * t);
     let (sx, sy) = (s(fx), s(fy));
-    let at = |i: i32, j: i32| rnd(i.rem_euclid(period), j.rem_euclid(period), seed);
     let (i, j) = (x0 as i32, y0 as i32);
-    let a = at(i, j) + (at(i + 1, j) - at(i, j)) * sx;
-    let b = at(i, j + 1) + (at(i + 1, j + 1) - at(i, j + 1)) * sx;
+    // A lattice index and the next one, wrapped into the tile: the same as
+    // `i.rem_euclid(period)` and `(i + 1).rem_euclid(period)` with one
+    // division (none for a power of two).
+    let wrap = |i: i32| {
+        if period <= 0 || i == i32::MAX {
+            return (i.rem_euclid(period), (i + 1).rem_euclid(period));
+        }
+        let r = if period & (period - 1) == 0 {
+            i & (period - 1)
+        } else {
+            i.rem_euclid(period)
+        };
+        (r, if r + 1 == period { 0 } else { r + 1 })
+    };
+    let ((i0, i1), (j0, j1)) = (wrap(i), wrap(j));
+    let at = |i: i32, j: i32| rnd(i, j, seed);
+    let a = at(i0, j0) + (at(i1, j0) - at(i0, j0)) * sx;
+    let b = at(i0, j1) + (at(i1, j1) - at(i0, j1)) * sx;
     a + (b - a) * sy
 }
 
@@ -581,6 +596,30 @@ mod tests {
             let b = fbm(1.0, v, 4, 3, 7);
             assert!((a - b).abs() < 1e-5);
             assert!((0.0..1.0).contains(&a));
+        }
+    }
+
+    #[test]
+    fn noise_wraps_like_rem_euclid() {
+        // The noise as first written: four wrapping divisions per sample.
+        let reference = |u: f32, v: f32, period: i32, seed: u32| {
+            let (x, y) = (u * period as f32, v * period as f32);
+            let (x0, y0) = (x.floor(), y.floor());
+            let (fx, fy) = (x - x0, y - y0);
+            let s = |t: f32| t * t * (3.0 - 2.0 * t);
+            let (sx, sy) = (s(fx), s(fy));
+            let at = |i: i32, j: i32| rnd(i.rem_euclid(period), j.rem_euclid(period), seed);
+            let (i, j) = (x0 as i32, y0 as i32);
+            let a = at(i, j) + (at(i + 1, j) - at(i, j)) * sx;
+            let b = at(i, j + 1) + (at(i + 1, j + 1) - at(i, j + 1)) * sx;
+            a + (b - a) * sy
+        };
+        for period in 1..=24 {
+            for k in -300..300 {
+                let (u, v) = (k as f32 * 0.0137, k as f32 * -0.0291 + 0.5);
+                let (a, b) = (vnoise(u, v, period, 9), reference(u, v, period, 9));
+                assert_eq!(a.to_bits(), b.to_bits(), "period {period}, u {u}, v {v}");
+            }
         }
     }
 
