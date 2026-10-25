@@ -171,9 +171,12 @@ impl Effects {
         }
     }
 
-    /// Draw in map coordinates (a world camera must be set).
-    pub fn draw(&self, view: Rect, zoom: f32) {
-        let min = 1.2 / zoom.max(1e-3);
+    /// Draw in map coordinates (a world camera must be set), as square
+    /// pixel blobs from short palettes, snapped to the pixel grid when `px`
+    /// is a buffer pixel (metres).
+    pub fn draw(&self, view: Rect, px: f32) {
+        let min = px;
+        let snap = |v: f32| (v / px).round() * px;
         for p in &self.parts {
             if !view.contains(p.pos) {
                 continue;
@@ -181,20 +184,52 @@ impl Effects {
             let t = p.age / p.life;
             let (col, size) = match p.kind {
                 Kind::Flame => {
-                    let c = if t < 0.25 {
-                        Color::new(1.0, 0.85, 0.35, 0.7)
-                    } else if t < 0.6 {
-                        Color::new(1.0, 0.42, 0.08, 0.6 * (1.0 - t))
+                    // White-hot, yellow, orange, red, then smoke.
+                    let c = if t < 0.12 {
+                        Color::new(1.0, 0.96, 0.72, 0.95)
+                    } else if t < 0.3 {
+                        Color::new(1.0, 0.82, 0.25, 0.9)
+                    } else if t < 0.55 {
+                        Color::new(0.98, 0.48, 0.1, 0.85)
+                    } else if t < 0.72 {
+                        Color::new(0.78, 0.2, 0.08, 0.75)
                     } else {
-                        Color::new(0.25, 0.22, 0.22, 0.45 * (1.0 - t))
+                        Color::new(0.2, 0.18, 0.2, 0.5 * (1.0 - t) / 0.28)
                     };
-                    (c, p.size * (1.0 + 0.6 * t))
+                    (c, p.size * (1.0 + 0.8 * t))
                 }
-                Kind::Ember => (Color::new(1.0, 0.7, 0.2, 1.0 - t), p.size),
-                Kind::Water => (Color::new(0.7, 0.85, 1.0, 0.7 * (1.0 - t)), p.size),
-                Kind::Puff => (Color::new(0.85, 0.88, 0.8, 0.45 * (1.0 - t)), p.size),
+                Kind::Ember => (
+                    if t < 0.5 {
+                        Color::new(1.0, 0.85, 0.35, 1.0)
+                    } else {
+                        Color::new(0.95, 0.4, 0.1, 1.0 - t)
+                    },
+                    p.size,
+                ),
+                Kind::Water => (
+                    if t < 0.4 {
+                        Color::new(0.86, 0.94, 1.0, 0.85)
+                    } else {
+                        Color::new(0.55, 0.75, 0.95, 0.7 * (1.0 - t))
+                    },
+                    p.size,
+                ),
+                Kind::Puff => (
+                    if t < 0.5 {
+                        Color::new(0.9, 0.92, 0.84, 0.6)
+                    } else {
+                        Color::new(0.78, 0.8, 0.74, 0.5 * (1.0 - t) * 2.0)
+                    },
+                    p.size,
+                ),
             };
-            draw_circle(p.pos.x, p.pos.y, size.max(min), col);
+            let h = (size.max(min) / px).round().max(1.0) * px * 0.5;
+            let (x, y) = (snap(p.pos.x), snap(p.pos.y));
+            if p.kind == Kind::Puff || (p.kind == Kind::Flame && t > 0.72) {
+                draw_circle(x, y, h * 1.2, col);
+            } else {
+                draw_rectangle(x - h, y - h, 2.0 * h, 2.0 * h, col);
+            }
         }
     }
 

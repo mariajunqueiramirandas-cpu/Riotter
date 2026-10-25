@@ -172,6 +172,8 @@ async fn main() {
     let mut renderer = Renderer::new(&map);
     renderer.options.lod = args.lod;
     renderer.options.debug = args.markers;
+    renderer.options.pixel_art = args.pixel > 0;
+    renderer.options.chunk = args.pixel.max(1) as f32;
     eprintln!(
         "riot_app: {} people, {} sim threads, GL {}",
         people_total,

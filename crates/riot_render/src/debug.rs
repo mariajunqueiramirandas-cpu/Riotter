@@ -34,6 +34,9 @@ pub const SUPPLY_COLOURS: [Color; 4] = [
     Color::new(0.62, 0.42, 0.22, 1.0),
 ];
 
+/// Zoom (px/m) from which supply drops are drawn as pallets, not markers.
+pub const DROP_SPRITES_FROM: f32 = 6.0;
+
 /// Supply names by `SupplyKind`.
 pub const SUPPLY_NAMES: [&str; 4] = ["water", "medic", "shields", "barricade"];
 /// Objective names by `ObjectiveKind`.
@@ -82,7 +85,8 @@ pub fn draw_ground_markers(
     for o in &snap.objectives {
         let col = OBJECTIVE_COLOURS[(o.kind as usize).min(2)];
         let c = vec2(o.x, o.y);
-        let fill = if o.held { 0.22 } else { 0.1 };
+        // Light enough to keep the ground readable under a crowd.
+        let fill = if o.held { 0.09 } else { 0.05 };
         draw_circle(c.x, c.y, o.radius, with_alpha(col, fill));
         let hl = highlight == Some(o.slot);
         dashed_ring(
@@ -109,12 +113,15 @@ pub fn draw_ground_markers(
         let col = SUPPLY_COLOURS[(d.kind as usize).min(3)];
         let c = vec2(d.x, d.y);
         let r = (0.9f32).max(5.0 / z);
-        draw_circle(c.x, c.y, r * 1.15, Color::new(0.05, 0.05, 0.05, 0.8));
-        draw_circle(c.x, c.y, r, col);
-        if d.kind == 1 {
-            let red = Color::new(0.85, 0.1, 0.1, 1.0);
-            draw_rectangle(c.x - r * 0.6, c.y - r * 0.18, r * 1.2, r * 0.36, red);
-            draw_rectangle(c.x - r * 0.18, c.y - r * 0.6, r * 0.36, r * 1.2, red);
+        // Close up the pallet itself is drawn (`scene::build_drops`).
+        if z < DROP_SPRITES_FROM {
+            draw_circle(c.x, c.y, r * 1.15, Color::new(0.05, 0.05, 0.05, 0.8));
+            draw_circle(c.x, c.y, r, col);
+            if d.kind == 1 {
+                let red = Color::new(0.85, 0.1, 0.1, 1.0);
+                draw_rectangle(c.x - r * 0.6, c.y - r * 0.18, r * 1.2, r * 0.36, red);
+                draw_rectangle(c.x - r * 0.18, c.y - r * 0.6, r * 0.36, r * 1.2, red);
+            }
         }
         if z > 2.0 {
             labels.push(Label {

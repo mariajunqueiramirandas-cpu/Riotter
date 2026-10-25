@@ -1,31 +1,48 @@
-//! Procedural sprite sheets and palettes (DESIGN §18.2).
+//! Procedural sprite sheets and palettes (DESIGN §18.2), as pixel art.
 //!
-//! Every sheet is drawn once at startup into one atlas, seen from straight
-//! above with the person facing +x (forward) and +y to their right. The
-//! vertex shader rotates each sprite by `heading`, so a gait needs one strip
-//! of frames, not 8 or 16 directions.
+//! Every sheet is drawn once at startup per art level ([`crate::art`]), seen
+//! from straight above with the person facing +x (forward) and +y to their
+//! right. The vertex shader rotates each sprite by `heading`, so a gait needs
+//! one strip of frames, not 8 or 16 directions.
 //!
 //! The atlas holds no colours, only **palette weights**: R, G and B are the
 //! weights of three palette colours (which three depends on the layer, e.g.
 //! clothes, skin and trousers for the body), premultiplied by coverage in A.
 //! The fragment shader mixes the colours picked by a person's appearance bits,
-//! so a handful of sheets yields thousands of distinct-looking people, and
-//! linear filtering stays correct because the mix is linear in the texel.
+//! so a handful of sheets yields thousands of distinct-looking people. Any
+//! weight short of the coverage goes to a dark outline colour, so shading
+//! bands also shift towards it.
+//!
+//! The shapes are signed-distance shapes rasterized with hard edges: a pixel
+//! is painted when its centre is inside. Shading comes in bands, parts get a
+//! darker contour where they cross other parts (at the two densest levels),
+//! and every sprite gets a one-pixel outline.
 
 use std::f32::consts::TAU;
 
-/// Pixels per atlas cell side.
-pub const CELL: usize = 96;
+use crate::art::{self, Shape};
+
 /// Metres covered by a cell side; the person stands at the cell centre.
 pub const CELL_M: f32 = 2.0;
 /// Atlas cells per row.
 pub const COLS: usize = 16;
 /// Atlas rows of cells.
 pub const ROWS: usize = 5;
-/// Atlas width in pixels.
-pub const ATLAS_W: usize = CELL * COLS;
-/// Atlas height in pixels.
-pub const ATLAS_H: usize = CELL * ROWS;
+
+/// Pixels per atlas cell side at an art level (96 at level 0).
+pub fn cell(level: usize) -> usize {
+    (CELL_M * art::density(level)) as usize
+}
+
+/// Atlas width in pixels at an art level.
+pub fn atlas_w(level: usize) -> usize {
+    cell(level) * COLS
+}
+
+/// Atlas height in pixels at an art level.
+pub fn atlas_h(level: usize) -> usize {
+    cell(level) * ROWS
+}
 
 /// Atlas frame indices. The shader mirrors these numbers.
 pub mod frame {
@@ -45,6 +62,8 @@ pub mod frame {
     pub const STRIKE: u32 = 23;
     /// Both hands up, holding a camera.
     pub const FILM: u32 = 27;
+    /// A soft shadow under a standing person.
+    pub const SHADOW: u32 = 28;
     /// Body accessories: backpack, scarf, hi-vis vest, press vest.
     pub const ACCESSORY: u32 = 32;
     /// 16 hair styles.
@@ -92,8 +111,10 @@ pub mod pal_row {
     pub const VARIED: usize = 9;
 }
 
-/// The generated sheets: premultiplied RGBA8, `ATLAS_W × ATLAS_H`.
+/// The generated sheets of one art level: premultiplied RGBA8,
+/// `atlas_w(level) × atlas_h(level)`.
 pub struct Atlas {
+    pub level: usize,
     pub rgba: Vec<u8>,
 }
 
@@ -103,116 +124,12 @@ pub struct Palette {
 }
 
 // ---------------------------------------------------------------------------
-// Shapes
+// Painting
 
 type P = [f32; 2];
 
-/// A signed-distance shape in sprite metres (negative inside).
-#[derive(Clone, Debug)]
-enum Shape {
-    Circle(P, f32),
-    /// Centre, radii (along x, along y).
-    Ellipse(P, P),
-    /// Segment end points and radius.
-    Capsule(P, P, f32),
-    /// Centre, half extents, rotation, corner radius.
-    Box(P, P, f32, f32),
-    /// Convex polygon, counter-clockwise or clockwise.
-    Poly(Vec<P>),
-}
-
-fn sub(a: P, b: P) -> P {
-    [a[0] - b[0], a[1] - b[1]]
-}
-fn len(a: P) -> f32 {
-    (a[0] * a[0] + a[1] * a[1]).sqrt()
-}
-fn dot(a: P, b: P) -> f32 {
-    a[0] * b[0] + a[1] * b[1]
-}
-
-impl Shape {
-    /// Signed distance and a 0..1 "radius" used for bulge shading.
-    fn eval(&self, p: P) -> (f32, f32) {
-        match self {
-            Shape::Circle(c, r) => {
-                let d = len(sub(p, *c));
-                (d - r, (d / r).min(1.0))
-            }
-            Shape::Ellipse(c, r) => {
-                let q = sub(p, *c);
-                let k = len([q[0] / r[0], q[1] / r[1]]);
-                ((k - 1.0) * r[0].min(r[1]), k.min(1.0))
-            }
-            Shape::Capsule(a, b, r) => {
-                let pa = sub(p, *a);
-                let ba = sub(*b, *a);
-                let h = (dot(pa, ba) / dot(ba, ba).max(1e-9)).clamp(0.0, 1.0);
-                let d = len([pa[0] - ba[0] * h, pa[1] - ba[1] * h]);
-                (d - r, (d / r).min(1.0))
-            }
-            Shape::Box(c, half, ang, round) => {
-                let q = sub(p, *c);
-                let (s, co) = ang.sin_cos();
-                let l = [q[0] * co + q[1] * s, -q[0] * s + q[1] * co];
-                let dx = l[0].abs() - (half[0] - round);
-                let dy = l[1].abs() - (half[1] - round);
-                let outside = len([dx.max(0.0), dy.max(0.0)]);
-                let inside = dx.max(dy).min(0.0);
-                let n = (l[0].abs() / half[0]).max(l[1].abs() / half[1]);
-                (outside + inside - round, n.min(1.0))
-            }
-            Shape::Poly(pts) => {
-                // Convex: the largest half-plane distance (exact inside,
-                // a slight overestimate near outer corners, fine for sprites).
-                let area: f32 = (0..pts.len())
-                    .map(|i| {
-                        let (a, b) = (pts[i], pts[(i + 1) % pts.len()]);
-                        a[0] * b[1] - b[0] * a[1]
-                    })
-                    .sum();
-                let sign = if area >= 0.0 { 1.0 } else { -1.0 };
-                let mut d = f32::NEG_INFINITY;
-                for i in 0..pts.len() {
-                    let (a, b) = (pts[i], pts[(i + 1) % pts.len()]);
-                    let e = sub(b, a);
-                    let n = [e[1] * sign, -e[0] * sign];
-                    let nl = len(n).max(1e-9);
-                    d = d.max(dot(sub(p, a), n) / nl);
-                }
-                (d, 0.5)
-            }
-        }
-    }
-
-    /// Bounding box in metres.
-    fn bounds(&self) -> (P, P) {
-        match self {
-            Shape::Circle(c, r) => ([c[0] - r, c[1] - r], [c[0] + r, c[1] + r]),
-            Shape::Ellipse(c, r) => ([c[0] - r[0], c[1] - r[1]], [c[0] + r[0], c[1] + r[1]]),
-            Shape::Capsule(a, b, r) => (
-                [a[0].min(b[0]) - r, a[1].min(b[1]) - r],
-                [a[0].max(b[0]) + r, a[1].max(b[1]) + r],
-            ),
-            Shape::Box(c, half, _, _) => {
-                let e = len(*half);
-                ([c[0] - e, c[1] - e], [c[0] + e, c[1] + e])
-            }
-            Shape::Poly(pts) => {
-                let mut lo = [f32::INFINITY; 2];
-                let mut hi = [f32::NEG_INFINITY; 2];
-                for p in pts {
-                    lo = [lo[0].min(p[0]), lo[1].min(p[1])];
-                    hi = [hi[0].max(p[0]), hi[1].max(p[1])];
-                }
-                (lo, hi)
-            }
-        }
-    }
-}
-
 /// Which palette weight a shape writes.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Ink {
     /// Palette colour A (R channel).
     A,
@@ -220,7 +137,7 @@ enum Ink {
     B,
     /// Palette colour C (B channel).
     C,
-    /// Black.
+    /// The outline colour.
     Black,
 }
 
@@ -231,6 +148,7 @@ struct Style {
     /// How much darker the rim is (0 = flat).
     bulge: f32,
     opacity: f32,
+    /// Draw a darker contour where the shape crosses earlier parts.
     outline: bool,
 }
 
@@ -257,73 +175,161 @@ impl Style {
             ..self
         }
     }
+    fn bulge_less(self) -> Style {
+        Style {
+            bulge: self.bulge * 0.5,
+            ..self
+        }
+    }
 }
 
-/// Outline width in metres (about one atlas pixel).
-const OUTLINE: f32 = 0.022;
-const PX_PER_M: f32 = CELL as f32 / CELL_M;
+/// Weight of a palette colour at its plain brightness; the shader scales
+/// weights by `1 / BASE`, so a weight of 1 is a highlight.
+pub const BASE: f32 = 0.8;
 
-/// The atlas being painted, premultiplied f32 RGBA.
+/// One level of the atlas being painted: weights and coverage per pixel.
 struct Canvas {
+    level: usize,
+    ppm: f32,
+    cell: usize,
+    w: usize,
     px: Vec<[f32; 4]>,
 }
 
 impl Canvas {
-    fn new() -> Canvas {
+    fn new(level: usize) -> Canvas {
+        let (w, h) = (atlas_w(level), atlas_h(level));
         Canvas {
-            px: vec![[0.0; 4]; ATLAS_W * ATLAS_H],
+            level,
+            ppm: art::density(level),
+            cell: cell(level),
+            w,
+            px: vec![[0.0; 4]; w * h],
         }
+    }
+
+    /// Pixels of frame `f`'s cell: origin.
+    fn origin(&self, f: u32) -> (usize, usize) {
+        (
+            (f as usize % COLS) * self.cell,
+            (f as usize / COLS) * self.cell,
+        )
+    }
+
+    /// Fine details are only drawn where they span at least a pixel.
+    fn detailed(&self) -> bool {
+        self.level <= 1
     }
 
     fn draw(&mut self, f: u32, shape: &Shape, ink: Ink, style: Style) {
-        if style.outline {
-            self.fill(f, shape, OUTLINE, Ink::Black, 0.0, 0.0, style.opacity);
+        if style.outline && self.detailed() && ink != Ink::Black {
+            // Contour: one pixel around the part, a dark band of its own
+            // colour, only over parts already painted (the silhouette gets
+            // the outline instead).
+            self.fill(
+                f,
+                shape,
+                1.0,
+                ink,
+                style.shade * 0.45,
+                0.0,
+                style.opacity,
+                true,
+            );
         }
-        self.fill(f, shape, 0.0, ink, style.shade, style.bulge, style.opacity);
+        let bulge = if self.level <= 2 { style.bulge } else { 0.0 };
+        self.fill(f, shape, 0.0, ink, style.shade, bulge, style.opacity, false);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn fill(
         &mut self,
         f: u32,
         shape: &Shape,
-        grow: f32,
+        grow_px: f32,
         ink: Ink,
         shade: f32,
         bulge: f32,
         opacity: f32,
+        over_only: bool,
     ) {
-        let (ox, oy) = ((f as usize % COLS) * CELL, (f as usize / COLS) * CELL);
+        let (ox, oy) = self.origin(f);
         let (lo, hi) = shape.bounds();
-        let to_px = |m: f32| (m + CELL_M * 0.5) * PX_PER_M;
-        let x0 = (to_px(lo[0] - grow) - 2.0).floor().max(0.0) as usize;
-        let y0 = (to_px(lo[1] - grow) - 2.0).floor().max(0.0) as usize;
-        let x1 = ((to_px(hi[0] + grow) + 2.0).ceil() as usize).min(CELL);
-        let y1 = ((to_px(hi[1] + grow) + 2.0).ceil() as usize).min(CELL);
+        let half = CELL_M * 0.5;
+        let to_px = |m: f32| (m + half) * self.ppm;
+        let x0 = (to_px(lo[0]) - grow_px - 2.0).floor().max(0.0) as usize;
+        let y0 = (to_px(lo[1]) - grow_px - 2.0).floor().max(0.0) as usize;
+        let x1 = ((to_px(hi[0]) + grow_px + 2.0).ceil() as usize).min(self.cell);
+        let y1 = ((to_px(hi[1]) + grow_px + 2.0).ceil() as usize).min(self.cell);
+        // Highlight only on shapes big enough to show one.
+        let (smin, _) = {
+            let e = [hi[0] - lo[0], hi[1] - lo[1]];
+            (e[0].min(e[1]) * self.ppm, ())
+        };
         for py in y0..y1 {
             for px in x0..x1 {
                 let p = [
-                    (px as f32 + 0.5) / PX_PER_M - CELL_M * 0.5,
-                    (py as f32 + 0.5) / PX_PER_M - CELL_M * 0.5,
+                    (px as f32 + 0.5) / self.ppm - half,
+                    (py as f32 + 0.5) / self.ppm - half,
                 ];
                 let (d, r) = shape.eval(p);
-                let cov = ((0.5 - (d - grow) * PX_PER_M).clamp(0.0, 1.0)) * opacity;
-                if cov <= 0.0 {
+                if d * self.ppm >= grow_px + 0.02 {
                     continue;
                 }
-                let s = (shade * (1.0 - bulge * r * r)).clamp(0.0, 1.0);
+                let dst = &mut self.px[(oy + py) * self.w + ox + px];
+                if over_only && dst[3] < 0.5 {
+                    continue;
+                }
+                // Banded shading: base, two rim bands, a centre highlight.
+                let mut s = shade * BASE * (1.0 - bulge * r * r);
+                if bulge > 0.1 && r < 0.38 && smin >= 5.0 && !over_only {
+                    s = shade;
+                }
+                let s = ((s * 12.5).round() / 12.5).clamp(0.0, 1.0);
                 let w = match ink {
                     Ink::A => [s, 0.0, 0.0],
                     Ink::B => [0.0, s, 0.0],
                     Ink::C => [0.0, 0.0, s],
                     Ink::Black => [0.0, 0.0, 0.0],
                 };
-                let dst = &mut self.px[(oy + py) * ATLAS_W + ox + px];
+                let cov = opacity;
                 let keep = 1.0 - cov;
                 for c in 0..3 {
                     dst[c] = w[c] * cov + dst[c] * keep;
                 }
                 dst[3] = cov + dst[3] * keep;
             }
+        }
+    }
+
+    /// One-pixel outline around everything painted in frame `f`.
+    fn outline(&mut self, f: u32) {
+        let (ox, oy) = self.origin(f);
+        let n = self.cell;
+        let a = match self.level {
+            0 | 1 => 1.0,
+            2 => 0.8,
+            _ => 0.5,
+        };
+        let solid = |c: &Canvas, x: usize, y: usize| c.px[(oy + y) * c.w + ox + x][3] > 0.45;
+        let mut add = Vec::new();
+        // Keep the cell's border clear so filtering never bleeds.
+        for y in 1..n - 1 {
+            for x in 1..n - 1 {
+                if self.px[(oy + y) * self.w + ox + x][3] > 0.0 {
+                    continue;
+                }
+                if solid(self, x - 1, y)
+                    || solid(self, x + 1, y)
+                    || solid(self, x, y - 1)
+                    || solid(self, x, y + 1)
+                {
+                    add.push((x, y));
+                }
+            }
+        }
+        for (x, y) in add {
+            self.px[(oy + y) * self.w + ox + x] = [0.0, 0.0, 0.0, a];
         }
     }
 
@@ -741,15 +747,6 @@ fn head_frames(cv: &mut Canvas) {
     );
 }
 
-impl Style {
-    fn bulge_less(self) -> Style {
-        Style {
-            bulge: self.bulge * 0.5,
-            ..self
-        }
-    }
-}
-
 /// Where a held item sits: in the right hand at rest.
 pub const REST_HAND: [f32; 2] = [0.06, 0.28];
 
@@ -961,17 +958,35 @@ fn mid_frames(cv: &mut Canvas) {
 }
 
 /// Paint every sheet.
-pub fn build_atlas() -> Atlas {
-    let mut cv = Canvas::new();
+pub fn build_atlas(level: usize) -> Atlas {
+    let mut cv = Canvas::new(level);
     body_frames(&mut cv);
     accessory_frames(&mut cv);
     head_frames(&mut cv);
     item_frames(&mut cv);
     lying_frame(&mut cv);
     mid_frames(&mut cv);
+    for f in 0..frame::COUNT {
+        if f != frame::SHADOW {
+            cv.outline(f);
+        }
+    }
+    shadow_frame(&mut cv);
     Atlas {
+        level,
         rgba: cv.into_rgba8(),
     }
+}
+
+/// A soft shadow: a flat ellipse of plain coverage (the shader draws it
+/// dark and translucent).
+fn shadow_frame(cv: &mut Canvas) {
+    cv.draw(
+        frame::SHADOW,
+        &Shape::Ellipse([0.0, 0.0], [0.2, 0.3]),
+        Ink::Black,
+        SOLID.flat().no_outline(),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1147,32 +1162,38 @@ mod tests {
     use super::*;
 
     fn coverage(atlas: &Atlas, f: u32) -> u32 {
-        let (ox, oy) = ((f as usize % COLS) * CELL, (f as usize / COLS) * CELL);
-        let mut n = 0;
-        for y in 0..CELL {
-            for x in 0..CELL {
-                n += (atlas.rgba[((oy + y) * ATLAS_W + ox + x) * 4 + 3] > 128) as u32;
+        let (n, w) = (cell(atlas.level), atlas_w(atlas.level));
+        let (ox, oy) = ((f as usize % COLS) * n, (f as usize / COLS) * n);
+        let mut c = 0;
+        for y in 0..n {
+            for x in 0..n {
+                c += (atlas.rgba[((oy + y) * w + ox + x) * 4 + 3] > 128) as u32;
             }
         }
-        n
+        c
     }
 
     #[test]
     fn every_frame_is_painted_and_stays_inside_its_cell() {
         assert!(frame::COUNT as usize <= COLS * ROWS);
-        let atlas = build_atlas();
-        assert_eq!(atlas.rgba.len(), ATLAS_W * ATLAS_H * 4);
-        for f in 0..frame::COUNT {
-            if f == frame::ITEM || f == frame::HEADWEAR + 3 || (28..32).contains(&f) {
-                continue; // unused slots
-            }
-            assert!(coverage(&atlas, f) > 30, "frame {f} is empty");
-            // A 4-pixel border stays clear, so filtering never bleeds.
-            let (ox, oy) = ((f as usize % COLS) * CELL, (f as usize / COLS) * CELL);
-            for k in 0..CELL {
-                for (x, y) in [(k, 0), (k, CELL - 1), (0, k), (CELL - 1, k)] {
-                    let a = atlas.rgba[((oy + y) * ATLAS_W + ox + x) * 4 + 3];
-                    assert_eq!(a, 0, "frame {f} touches its border");
+        for level in 0..art::LEVELS {
+            let atlas = build_atlas(level);
+            let (n, w) = (cell(level), atlas_w(level));
+            assert_eq!(atlas.rgba.len(), w * atlas_h(level) * 4);
+            for f in 0..frame::COUNT {
+                if f == frame::ITEM || f == frame::HEADWEAR + 3 || (29..32).contains(&f) {
+                    continue; // unused slots
+                }
+                // Small parts may vanish at the coarsest levels.
+                let min = [30, 10, 2, 0][level];
+                assert!(coverage(&atlas, f) >= min, "frame {f} is empty at {level}");
+                // The border stays clear, so sampling never bleeds.
+                let (ox, oy) = ((f as usize % COLS) * n, (f as usize / COLS) * n);
+                for k in 0..n {
+                    for (x, y) in [(k, 0), (k, n - 1), (0, k), (n - 1, k)] {
+                        let a = atlas.rgba[((oy + y) * w + ox + x) * 4 + 3];
+                        assert_eq!(a, 0, "frame {f} touches its border at {level}");
+                    }
                 }
             }
         }
@@ -1180,33 +1201,44 @@ mod tests {
 
     #[test]
     fn weights_are_premultiplied() {
-        let atlas = build_atlas();
-        for px in atlas.rgba.chunks_exact(4) {
-            assert!(px[0].max(px[1]).max(px[2]) as u32 <= px[3] as u32 + 1);
+        for level in 0..art::LEVELS {
+            let atlas = build_atlas(level);
+            for px in atlas.rgba.chunks_exact(4) {
+                let sum = px[0] as u32 + px[1] as u32 + px[2] as u32;
+                assert!(sum <= px[3] as u32 + 1);
+            }
         }
     }
 
     /// `RIOT_ATLAS_PNG=/path/atlas.png cargo test -p riot_render dump_atlas -- --ignored`
-    /// writes the atlas (weights shown as R/G/B over grey) for inspection.
+    /// writes the level-0 atlas (weights shown as R/G/B over grey) for
+    /// inspection, and `atlas-1.png` … for the other levels.
     #[test]
     #[ignore]
     fn dump_atlas() {
         let path = std::env::var("RIOT_ATLAS_PNG").unwrap_or_else(|_| "atlas.png".into());
-        let atlas = build_atlas();
-        let mut bytes = atlas.rgba.clone();
-        for px in bytes.chunks_exact_mut(4) {
-            let k = 255 - px[3] as u32;
-            for c in 0..3 {
-                px[c] = (px[c] as u32 + 90 * k / 255) as u8;
+        for level in 0..art::LEVELS {
+            let atlas = build_atlas(level);
+            let mut bytes = atlas.rgba.clone();
+            for px in bytes.chunks_exact_mut(4) {
+                let k = 255 - px[3] as u32;
+                for c in 0..3 {
+                    px[c] = (px[c] as u32 + 90 * k / 255) as u8;
+                }
+                px[3] = 255;
             }
-            px[3] = 255;
+            let p = if level == 0 {
+                path.clone()
+            } else {
+                path.replace(".png", &format!("-{level}.png"))
+            };
+            macroquad::texture::Image {
+                bytes,
+                width: atlas_w(level) as u16,
+                height: atlas_h(level) as u16,
+            }
+            .export_png(&p);
         }
-        macroquad::texture::Image {
-            bytes,
-            width: ATLAS_W as u16,
-            height: ATLAS_H as u16,
-        }
-        .export_png(&path);
     }
 
     #[test]

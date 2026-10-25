@@ -21,9 +21,9 @@ const ESCALATION: [&str; 5] = [
 
 const HELP_LINE: &str = "WASD/arrows/right-drag pan · wheel zoom · Space pause · 1-4 / +- speed · \
      M H X tool · click place · [ ] slot · T stance · R organizer · B broadcast · C chant · \
-     Q/E supplies · G gas · F fire · U spawn · O overlay · L lod · F1 help";
+     Q/E supplies · G gas · F fire · U spawn · O overlay · L lod · K J pixels · F1 help";
 
-const HELP: [&str; 14] = [
+const HELP: [&str; 15] = [
     "Camera   WASD / arrows (Shift = faster), right or middle drag, wheel = zoom, Home = whole map",
     "Time     Space pause · 1 2 3 4 = 1× 2× 4× 8× · + / - faster / slower · . one tick while paused",
     "Plan     M march-to · H hold · X disperse, then left click places the objective in the slot",
@@ -34,6 +34,7 @@ const HELP: [&str; 14] = [
     "Supply   Q choose water / medic / shields / barricade · E drop 20 at the cursor",
     "Debug    G gas canister · F ignite · U spawn 100 people · Y threat · PgUp force escalation",
     "View     O cycle field overlay · L level of detail · Tab markers · V roofs · P phase timings",
+    "         K pixel art on/off · J pixel size 1× / 2× · N time-of-day light",
     "",
     "Nothing here is an order: objectives only matter to people who hear about them,",
     "and they hear through organizers' broadcasts spreading like rumours.",
@@ -170,10 +171,15 @@ pub fn draw(h: &HudInput) {
     ));
     lines.push((
         format!(
-            "overlay: {}  ·  lod: {}  ·  zoom {:.2} px/m  ·  drawn {} of {} people{}",
+            "overlay: {}  ·  lod: {}  ·  zoom {:.2} px/m{}  ·  drawn {} of {} people{}",
             i.overlay.name(),
             h.render.lod.map_or("-", |l| l.name()),
             h.zoom,
+            if h.render.pixel {
+                format!(" (art {:.0} px/m)", h.render.density)
+            } else {
+                String::new()
+            },
             h.render.people,
             h.people_total,
             if i.overlay != Overlay::None && st.paused {

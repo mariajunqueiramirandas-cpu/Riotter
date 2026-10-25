@@ -780,16 +780,17 @@ The snapshot is **written in `stable_id` order**: it gathers through `slot_of`, 
 
 ### 18.2 Drawing
 
+- **Pixel art at the art's own density.** Every sheet is drawn as pixel art at four densities (48, 24, 12 and 6 px/m). The world is rendered into an offscreen buffer at the densest of these that fits the zoom, with the camera snapped to whole buffer pixels, so textures and sprites are sampled texel for pixel; a sharp-bilinear composite scales the buffer to the screen. Zoomed out past 6 px/m the buffer matches the screen.
 - **Interpolation runs on the GPU.** The two most recent snapshots are uploaded as instance buffers, and the vertex shader blends position and heading with the frame's alpha. The CPU does no per-person work per frame.
 - **Layered "paper doll" sprites, drawn from above.** Body, clothes, hair and held item are separate sheets. The camera looks straight down, so each sheet is drawn facing one way and the vertex shader rotates it by `heading`. Facing turns smoothly in 1.4° steps, and each gait needs one strip of frames, not 8 or 16 directions. Colours come from palette swaps in the shader, indexed by `appearance`, so a handful of sheets yields thousands of distinct-looking people. Each layer is one instanced draw call.
 - **Draw order by layer, no sorting.** Layers draw bottom to top:
-  1. ground and decals
+  1. ground, decals, shadows and props
   2. fallen people
-  3. standing people
+  3. people's shadows and standing people
   4. vehicles
   5. projectiles
   6. gas and smoke
-  7. roofs and tree canopies
+  7. roofs, rooftop plant and tree canopies
 
   Bodies never overlap (§11.2), so sprites in the same layer don't need sorting either. Overhead polygons turn see-through where people stand under them.
 - **Level of detail.**
@@ -798,7 +799,9 @@ The snapshot is **written in `stable_id` order**: it gathers through `slot_of`, 
   - Close zoom: full layered sprites.
 - **Culling.** Each tick, the renderer collects the people in field chunks that overlap the camera, plus a margin, and uploads only those instances. On a big map most people are off-screen at close zoom.
 - **Animation timing.** Frames come from `stride`, which is simulation data. Purely cosmetic motion (breathing, flags waving, hair) runs on the render clock and never feeds back.
-- **Effects.** Gas is drawn from the gas layer as a smooth texture (GPU bilinear filtering) plus particles. Fire and water cannon are particles.
+- **Effects.** Gas is drawn from the gas layer as a smooth texture (GPU bilinear filtering), its translucency quantized and ordered-dithered on the world's pixel grid, plus particles. Fire and water cannon are particles drawn as pixel blobs.
+- **Shadows.** Buildings, walls, trees, props, vehicles and people cast shadows towards the south-east. All shadows are drawn at one depth with a less-than test, so where they overlap they darken once.
+- **Time of day.** The composite grades colour by the clock: warm at dusk, dark blue at night. At dusk and night street lamps, fires, molotovs and police light bars draw pools of light into a light buffer, and the scene is lit by the day's light plus that buffer.
 - **Debug overlays** draw field layers (density, fear, gas, messages) and contact pressure as heatmaps. These are the main tool for tuning emergent behaviour.
 
 ### 18.3 Technology
@@ -888,7 +891,7 @@ What the code does where it departs from or settles something in this document, 
 - **The tick runs on a thread team, not rayon (§12).** On the 4-vCPU cloud VM used for development, a rayon parallel loop costs about 7 µs back to back but 90–120 µs after a stretch of serial work, because idle workers (and the joining thread) sleep and are woken through the OS scheduler; a tick has about 25 such loops. `riot_team` is a small fork-join team whose workers spin for 2 ms after each job before parking (dispatch and join in 1.5–4 µs). Tasks are chunk indices, each run exactly once, so results do not depend on the thread count; reductions must be exact (integer sums, max). Its rayon-shaped API (`par_chunks_mut`, `zip`, `enumerate`, `for_each`, `map`/`reduce`) let the simulation switch by changing one import per module. Its atomics and unsafe code stay in that crate. Rayon still builds maps at load time.
 - **Props are static obstacles.** The obstacle grid for props is rebuilt only when a prop is built, finished or destroyed; moving vehicles have their own small grid rebuilt every tick. Without this, the parked cars of a large map made the per-tick cost grow with map area.
 - **Dependencies (§4.1).** `riot_core` and `riot_sim` use `bytemuck` with its derive macro for the `Pod` lane and snapshot types. `riot_data` adds `serde_json` and `miniz_oxide` (Tiled's zlib and gzip layers).
-- **Sprites (§18).** The paper-doll atlas is generated procedurally in `riot_render`; there is no `data/sprites/`.
+- **Sprites (§18).** All art is generated procedurally in `riot_render` at start-up, as pixel art at four densities: the paper-doll atlas, tileable ground and roof materials, decals, props and vehicles. There is no `data/sprites/`. Map meshes are textured and built in layers grouped by material, so a whole city is a few dozen draw batches.
 - **Tooling (§19).** Per-phase benchmarks come from `riot_headless bench` (p50, p99, CSV, `--budget`), not criterion. Kernels have unit tests but no proptest suite. Tracy and code hot reload are not integrated; tunables hot reload is.
 
 **Performance against §3 (4-vCPU cloud VM)**
