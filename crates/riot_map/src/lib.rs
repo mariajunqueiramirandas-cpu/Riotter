@@ -760,37 +760,30 @@ impl Map {
                 let key = |lx: u32, ly: u32, c: u8| {
                     ((ly * REGION + lx) as usize * MAX_COMP + c as usize) as u16
                 };
+                // Join the components that touch across the +x and +y borders
+                // inside the region: the links `build_links` found along the
+                // border cells. Union by minimum keeps every root the
+                // smallest key of its set whatever the order of the unions,
+                // so the ids below depend only on the partition.
                 for ly in 0..REGION {
                     for lx in 0..REGION {
-                        let (tx, ty) = (rx * REGION + lx, ry * REGION + ly);
-                        for (dx, dy) in [(1u32, 0u32), (0, 1)] {
-                            let (nx, ny) = (lx + dx, ly + dy);
+                        let t = this.tile_index(rx * REGION + lx, ry * REGION + ly);
+                        for (dir, nx, ny) in [(0, lx + 1, ly), (2, lx, ly + 1)] {
                             if nx >= REGION || ny >= REGION {
                                 continue;
                             }
-                            for k in 0..TILE {
-                                let (ca, cb) = if dx == 1 {
-                                    (
-                                        (tx * TILE + 15, ty * TILE + k),
-                                        ((tx + 1) * TILE, ty * TILE + k),
-                                    )
-                                } else {
-                                    (
-                                        (tx * TILE + k, ty * TILE + 15),
-                                        (tx * TILE + k, (ty + 1) * TILE),
-                                    )
-                                };
-                                if let (Some(a), Some(b)) =
-                                    (this.comp_of(ca.0, ca.1), this.comp_of(cb.0, cb.1))
-                                {
-                                    let (ra, rb) = (
-                                        find(&mut parent, key(lx, ly, a)),
-                                        find(&mut parent, key(nx, ny, b)),
-                                    );
-                                    if ra != rb {
-                                        let (lo, hi) = if ra < rb { (ra, rb) } else { (rb, ra) };
-                                        parent[hi as usize] = lo;
-                                    }
+                            let mut l = this.tile_links(t, dir);
+                            while l != 0 {
+                                let bit = l.trailing_zeros();
+                                l &= l - 1;
+                                let (a, b) = ((bit / 4) as u8, (bit % 4) as u8);
+                                let (ra, rb) = (
+                                    find(&mut parent, key(lx, ly, a)),
+                                    find(&mut parent, key(nx, ny, b)),
+                                );
+                                if ra != rb {
+                                    let (lo, hi) = if ra < rb { (ra, rb) } else { (rb, ra) };
+                                    parent[hi as usize] = lo;
                                 }
                             }
                         }
@@ -864,12 +857,12 @@ impl Map {
         }
         self.region_first.push(self.rnodes.len() as u32);
 
-        // Region adjacency across region borders.
+        // Region adjacency across region borders, from the tile links (the
+        // sort and dedup make the list independent of the push order).
         let mut edges: Vec<(u32, u32)> = Vec::new();
         for ty in 0..tdim {
             for tx in 0..tdim {
-                for (dx, dy) in [(1u32, 0u32), (0, 1)] {
-                    let (nx, ny) = (tx + dx, ty + dy);
+                for (dir, nx, ny) in [(0, tx + 1, ty), (2, tx, ty + 1)] {
                     if nx >= tdim
                         || ny >= tdim
                         || (nx / REGION == tx / REGION && ny / REGION == ty / REGION)
@@ -877,20 +870,12 @@ impl Map {
                         continue;
                     }
                     let (ta, tb) = (self.tile_index(tx, ty), self.tile_index(nx, ny));
-                    if self.tile_ncomp(ta) == 0 || self.tile_ncomp(tb) == 0 {
-                        continue;
-                    }
-                    for k in 0..TILE {
-                        let (ca, cb) = if dx == 1 {
-                            ((tx * TILE + 15, ty * TILE + k), (nx * TILE, ty * TILE + k))
-                        } else {
-                            ((tx * TILE + k, ty * TILE + 15), (tx * TILE + k, ny * TILE))
-                        };
-                        if let (Some(a), Some(b)) =
-                            (self.comp_of(ca.0, ca.1), self.comp_of(cb.0, cb.1))
-                            && let (Some(na), Some(nb)) =
-                                (self.rnode_of(ta, a), self.rnode_of(tb, b))
-                        {
+                    let mut l = self.tile_links(ta, dir);
+                    while l != 0 {
+                        let bit = l.trailing_zeros();
+                        l &= l - 1;
+                        let (a, b) = ((bit / 4) as u8, (bit % 4) as u8);
+                        if let (Some(na), Some(nb)) = (self.rnode_of(ta, a), self.rnode_of(tb, b)) {
                             edges.push((na, nb));
                             edges.push((nb, na));
                         }
