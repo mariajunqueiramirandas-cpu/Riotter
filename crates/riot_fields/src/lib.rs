@@ -73,6 +73,25 @@ pub const FUSED: usize = 3;
 /// A layer of zeros.
 static ZEROS: [f32; CL] = [0.0; CL];
 
+/// Cell (`y * CC + x`) of each Morton code of a cell in its chunk.
+static RUN_CELL: [u16; CL] = {
+    let mut t = [0; CL];
+    let mut k = 0;
+    while k < CL {
+        let (x, y) = demorton2(k as u32);
+        t[k] = (y * CC as u32 + x) as u16;
+        k += 1;
+    }
+    t
+};
+
+/// The cell in its chunk of a field-index run (whose key's low 12 bits are
+/// the cell's Morton code).
+#[inline(always)]
+pub fn run_cell(key: u32) -> usize {
+    RUN_CELL[(key & 0xfff) as usize] as usize & (CL - 1)
+}
+
 /// A layer's bit in the per-slot layer masks.
 #[inline(always)]
 const fn bit(l: Layer) -> u16 {
@@ -562,8 +581,7 @@ impl Fields {
                 }
                 let [r0, r1] = slot_runs[slot];
                 for run in &sp.runs[r0 as usize..r1 as usize] {
-                    let (lx, ly) = demorton2(run.key & 0xfff);
-                    let cell = ly as usize * CC + lx as usize;
+                    let cell = run_cell(run.key);
                     let (mut n, mut sf, mut sa, mut off, mut inj) = (0u32, 0u32, 0u32, 0u32, 0u32);
                     let mut seen = 0u32;
                     for &i in &sp.fsort.order[run.start as usize..run.end as usize] {

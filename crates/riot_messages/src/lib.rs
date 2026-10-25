@@ -16,7 +16,6 @@
 #![deny(unsafe_code)]
 
 use riot_core::Vec2;
-use riot_core::grid::demorton2;
 use riot_core::lanes::{self, CHUNK_AGENTS};
 use riot_core::rng::{Stream, roll, roll_key, unit};
 use riot_team::prelude::*;
@@ -25,7 +24,7 @@ use riot_defs::archetype::{ARCHETYPES, Archetype, ArchetypeParams, Stance};
 use riot_defs::setup::{CommsMode, NotableKind, minutes};
 use riot_defs::state::{Action, belief, emo, flag, intent, stat};
 use riot_defs::targets::Objective;
-use riot_fields::{CC, CL, Fields, Layer, NO_CHUNK, NO_SLOT};
+use riot_fields::{CC, CL, Fields, Layer, NO_CHUNK, NO_SLOT, run_cell};
 use riot_people::People;
 use riot_spatial::{FIELD_CELL, Spatial};
 use riot_world::World;
@@ -176,7 +175,6 @@ fn scatter(f: &mut Fields, sp: &Spatial, p: &People, hop: u16) {
         m.fill(0);
         let [r0, r1] = slot_runs[slot];
         for run in &sp.runs[r0 as usize..r1 as usize] {
-            let (lx, ly) = demorton2(run.key & 0xfff);
             let mut best = 0u16;
             for &i in &sp.fsort.order[run.start as usize..run.end as usize] {
                 let b = p.belief[i as usize];
@@ -189,7 +187,7 @@ fn scatter(f: &mut Fields, sp: &Spatial, p: &People, hop: u16) {
                 }
                 best = best.max(belief::pack(belief::id(b), fid as u8));
             }
-            m[ly as usize * CC + lx as usize] = best;
+            m[run_cell(run.key)] = best;
         }
     });
 }
