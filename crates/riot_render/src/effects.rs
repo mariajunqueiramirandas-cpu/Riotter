@@ -3,7 +3,7 @@
 //! cosmetic: they run on the render clock and never feed back.
 
 use macroquad::prelude::*;
-use riot_sim::snapshot::Snapshot;
+use riot_snapshot::Snapshot;
 
 use crate::fields::Burning;
 

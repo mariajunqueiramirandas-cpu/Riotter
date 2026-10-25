@@ -7,8 +7,8 @@
 //! text stays crisp at every zoom.
 
 use macroquad::prelude::*;
-use riot_sim::mapdef::{EntryDef, EntryKind};
-use riot_sim::snapshot::Snapshot;
+use riot_defs::mapdef::{EntryDef, EntryKind};
+use riot_snapshot::Snapshot;
 
 use crate::camera::Camera;
 
@@ -43,7 +43,7 @@ pub const DROP_SPRITES_FROM: f32 = 6.0;
 pub const SUPPLY_NAMES: [&str; 4] = ["water", "medic", "shields", "barricade"];
 /// Objective names by `ObjectiveKind`.
 pub const OBJECTIVE_NAMES: [&str; 3] = ["march-to", "hold", "disperse"];
-const DOCTRINES: [&str; riot_sim::police::DOCTRINES] = [
+const DOCTRINES: [&str; riot_defs::police::DOCTRINES] = [
     "idle",
     "travel",
     "hold line",
@@ -141,7 +141,7 @@ pub fn draw_police_plan(snap: &Snapshot, cam: &Camera, time: f32, labels: &mut V
             draw_triangle(b, l, r, faint);
         }
         if z > 0.35 && t.op != 0 {
-            let name = riot_sim::tactics::OpKind::from_u8(t.op).name();
+            let name = riot_defs::police::OpKind::from_u8(t.op).name();
             let eta = if t.site && t.eta.is_finite() && t.eta < 3600.0 {
                 format!(" · site in {}", mmss(t.eta))
             } else {

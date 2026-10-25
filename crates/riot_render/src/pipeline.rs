@@ -15,7 +15,7 @@
 //! shadow so a crowd's shadows never stack.
 
 use macroquad::miniquad::*;
-use riot_sim::snapshot::SnapPerson;
+use riot_snapshot::SnapPerson;
 
 use crate::art;
 use crate::pixel::View;
@@ -364,7 +364,7 @@ void main() {
     float stride = pose1.z;
     float flags = pose1.w;
 
-    // Appearance bits (riot_sim::snapshot::Appearance).
+    // Appearance bits (riot_snapshot::Appearance).
     float arch = field(app1.x, 1.0, 16.0);
     float body = field(app1.x, 16.0, 4.0);
     float skin = field(app1.x, 64.0, 4.0) + field(app1.y, 1.0, 2.0) * 4.0;

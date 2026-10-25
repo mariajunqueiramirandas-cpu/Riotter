@@ -7,11 +7,11 @@
 //! tunables. The crates are split so they compile side by side:
 //!
 //! - [`tiled`] (`riot_data_tiled`): Tiled JSON maps →
-//!   [`MapDef`](riot_sim::MapDef) ([`load_map`], [`parse_map`]); the
+//!   [`MapDef`](riot_defs::MapDef) ([`load_map`], [`parse_map`]); the
 //!   convention is in `data/maps/README.md`. All JSON serde code is here.
 //! - [`citygen`] (`riot_data_citygen`): a procedural city up to 8 km across,
 //!   written as a Tiled map; plain code without serde.
-//! - [`scenario`]: RON scenarios → [`RiotSetup`](riot_sim::RiotSetup) plus
+//! - [`scenario`]: RON scenarios → [`RiotSetup`](riot_defs::RiotSetup) plus
 //!   their map and tunables ([`load_scenario`]); the file format is
 //!   `riot_data_scenario` and is documented in `data/scenarios/README.md`.
 //! - [`tunables`] (`riot_data_tunables`): `tunables.ron` ([`load_tunables`],

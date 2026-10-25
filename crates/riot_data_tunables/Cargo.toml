@@ -8,8 +8,8 @@ license.workspace = true
 
 [dependencies]
 riot_data_core.workspace = true
-# Only `Tunables`, `TUNABLES`, `Command` and `CommandKind`.
-riot_sim.workspace = true
+# `Tunables`, `TUNABLES`, `Command` and `CommandKind`.
+riot_defs.workspace = true
 serde.workspace = true
 ron.workspace = true
 

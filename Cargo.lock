@@ -397,7 +397,9 @@ dependencies = [
  "riot_data_scenario",
  "riot_data_tiled",
  "riot_data_tunables",
+ "riot_defs",
  "riot_sim",
+ "riot_testkit",
 ]
 
 [[package]]
@@ -408,6 +410,7 @@ dependencies = [
  "riot_core",
  "riot_data_core",
  "riot_data_tiled",
+ "riot_defs",
  "riot_sim",
 ]
 
@@ -421,7 +424,8 @@ version = "0.1.0"
 dependencies = [
  "riot_data_core",
  "riot_data_tunables",
- "riot_sim",
+ "riot_defs",
+ "riot_testkit",
  "ron",
  "serde",
 ]
@@ -432,7 +436,7 @@ version = "0.1.0"
 dependencies = [
  "miniz_oxide 0.8.9",
  "riot_data_core",
- "riot_sim",
+ "riot_defs",
  "serde",
  "serde_json",
 ]
@@ -442,7 +446,7 @@ name = "riot_data_tunables"
 version = "0.1.0"
 dependencies = [
  "riot_data_core",
- "riot_sim",
+ "riot_defs",
  "ron",
  "serde",
 ]
@@ -536,9 +540,10 @@ name = "riot_mesh"
 version = "0.1.0"
 dependencies = [
  "riot_art",
+ "riot_defs",
  "riot_materials",
  "riot_sheets",
- "riot_sim",
+ "riot_testkit",
 ]
 
 [[package]]
@@ -607,10 +612,11 @@ version = "0.1.0"
 dependencies = [
  "macroquad",
  "riot_art",
+ "riot_defs",
  "riot_materials",
  "riot_mesh",
  "riot_sheets",
- "riot_sim",
+ "riot_snapshot",
  "riot_sprites",
 ]
 

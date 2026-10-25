@@ -1,6 +1,6 @@
 [package]
 name = "riot_data"
-description = "RON scenarios, tunables and Tiled maps → riot_sim types."
+description = "RON scenarios, tunables and Tiled maps → riot_defs types."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,9 +14,11 @@ riot_data_tiled.workspace = true
 riot_data_citygen.workspace = true
 riot_data_tunables.workspace = true
 riot_data_scenario.workspace = true
-# Only definitions: `MapDef`, `RiotSetup`, `Tunables` and, for
-# `generated:testkit` maps, `testkit::district`.
-riot_sim.workspace = true
+# Definitions only (`MapDef`, `RiotSetup`, `Tunables`) and, for
+# `generated:testkit` maps, `riot_testkit::district`: the data layer never
+# waits for the simulation to compile.
+riot_defs.workspace = true
+riot_testkit.workspace = true
 
 [dev-dependencies]
 # The tests build worlds (`riot_sim::World`); `gen_data --nav` builds the

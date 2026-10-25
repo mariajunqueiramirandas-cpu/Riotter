@@ -4,7 +4,7 @@
 //! stream mesh per frame; there are at most a few thousand of them.
 
 use macroquad::prelude::*;
-use riot_sim::snapshot::Snapshot;
+use riot_snapshot::Snapshot;
 
 use crate::mesh::{MeshBuilder, Pass, Rgba, Tex};
 use crate::pixel::View;

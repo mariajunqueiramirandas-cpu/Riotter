@@ -70,7 +70,7 @@ pub mod frame {
     pub const HEAD: u32 = 36;
     /// Cap, helmet, balaclava.
     pub const HEADWEAR: u32 = 52;
-    /// Held items by `riot_sim::state::Item` code (0 is unused).
+    /// Held items by `riot_defs::state::Item` code (0 is unused).
     pub const ITEM: u32 = 56;
     /// Lying on the ground: fallen or carried. Body and head in one sheet.
     pub const LYING: u32 = 67;
@@ -1045,7 +1045,7 @@ const TROUSERS: [Rgb; 8] = [
 ];
 
 /// Clothes top and bottom for each of the 64 clothes palettes. Ranges follow
-/// `riot_sim::world::appearance_for`: 0–43 crowd, 44–51 radicals, 52–55
+/// `riot_snapshot::appearance_for`: 0–43 crowd, 44–51 radicals, 52–55
 /// organizers, 56–59 journalists, 60–61 officers.
 fn clothes(i: usize) -> (Rgb, Rgb) {
     match i {

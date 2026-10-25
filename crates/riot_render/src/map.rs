@@ -4,8 +4,8 @@
 //! culled to the view.
 
 use macroquad::miniquad::RenderingBackend;
+use riot_defs::mapdef::MapDef;
 pub use riot_mesh::map::{DETAIL_ZOOM, OUTSIDE, build_ground, build_roofs};
-use riot_sim::mapdef::MapDef;
 
 use crate::mesh::{self, MeshRenderer};
 use crate::pixel::View;

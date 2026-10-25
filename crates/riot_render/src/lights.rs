@@ -8,9 +8,9 @@
 //! pavement under it in its own colours. By day nothing is drawn.
 
 use macroquad::miniquad::*;
+use riot_defs::mapdef::MapDef;
 pub use riot_mesh::lamps::{Light, street_lamps};
-use riot_sim::mapdef::MapDef;
-use riot_sim::snapshot::Snapshot;
+use riot_snapshot::Snapshot;
 
 use crate::fields::Burning;
 use crate::pixel::View;

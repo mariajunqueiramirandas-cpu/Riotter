@@ -11,12 +11,12 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use riot_sim::mapdef::MapDef;
-use riot_sim::setup::{
+use riot_defs::mapdef::MapDef;
+use riot_defs::setup::{
     Arrival, Comms, CommsMode, Escalation, Limits, ObjectiveDef, ObjectiveKind, PoliceForce,
     SquadDef, SquadKind, Supplies, Weather, minutes,
 };
-use riot_sim::{ARCHETYPES, Archetype, RiotSetup, Stance, TICK_HZ};
+use riot_defs::{ARCHETYPES, Archetype, RiotSetup, Stance, TICK_HZ};
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -742,7 +742,7 @@ fn list(names: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use riot_sim::testkit;
+    use riot_testkit as testkit;
 
     #[test]
     fn setup_round_trips_through_ron() {

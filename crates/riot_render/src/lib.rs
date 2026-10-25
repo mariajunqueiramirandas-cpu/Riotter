@@ -53,9 +53,9 @@ pub use riot_sprites as sprites;
 
 use macroquad::miniquad::{PassAction, RenderingBackend};
 use macroquad::prelude::*;
-use riot_sim::mapdef::{EntryDef, MapDef};
-use riot_sim::snapshot::{Overlay, SnapPerson, Snapshot, snap_flag};
-use riot_sim::state::Gait;
+use riot_defs::mapdef::{EntryDef, MapDef};
+use riot_defs::state::Gait;
+use riot_snapshot::{Overlay, SnapPerson, Snapshot, snap_flag};
 
 pub use camera::{Camera, Lod};
 use mesh::{MeshBuilder, MeshRenderer, StreamMesh};

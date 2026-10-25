@@ -2,7 +2,7 @@
 //! ([`crate::map`]) gives each a lamp head; `riot_render::lights` lights the
 //! pavement under them at dusk and night.
 
-use riot_sim::mapdef::{Ground, MapDef};
+use riot_defs::mapdef::{Ground, MapDef};
 
 /// A light pool: centre, radius (m), colour and strength.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -67,7 +67,7 @@ mod tests {
 
     #[test]
     fn lamps_line_the_district_roads() {
-        let map = riot_sim::testkit::district(512.0, 64.0);
+        let map = riot_testkit::district(512.0, 64.0);
         let lamps = street_lamps(&map);
         assert!(lamps.len() > 20);
         // On the pavement, not in the road.

@@ -6,12 +6,12 @@
 //! The map is a Tiled JSON path relative to the scenario file, or a
 //! generator pseudo-path: `generated:city?size=8192&seed=3`,
 //! `generated:district?seed=1` (a 1 km city) or
-//! `generated:testkit?size=1024&block=64` (`riot_sim::testkit::district`).
+//! `generated:testkit?size=1024&block=64` (`riot_testkit::district`).
 
 use std::path::{Path, PathBuf};
 
-use riot_sim::mapdef::MapDef;
-use riot_sim::{RiotSetup, Tunables};
+use riot_defs::mapdef::MapDef;
+use riot_defs::{RiotSetup, Tunables};
 
 use riot_data_core::{DataError, Result};
 pub use riot_data_scenario::*;
@@ -135,7 +135,7 @@ fn generate_spec(spec: &str, rest: &str) -> Result<MapDef> {
                     }
                 }
             }
-            riot_sim::testkit::district(size.clamp(128.0, 8192.0), block.max(16.0))
+            riot_testkit::district(size.clamp(128.0, 8192.0), block.max(16.0))
         }
         _ => {
             return Err(DataError::new(format!(

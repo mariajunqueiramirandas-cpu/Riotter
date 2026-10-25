@@ -27,7 +27,7 @@
 //! model, and that crate writes the JSON and converts the model to a
 //! `MapDef`.
 
-use riot_sim::mapdef::{Ground, MapDef, PropKind, SolidKind};
+use riot_defs::mapdef::{Ground, MapDef, PropKind, SolidKind};
 
 use riot_data_core::math::{point_in_polygon, seg_dist2, sin, sin_cos_deg};
 use riot_data_tiled::{

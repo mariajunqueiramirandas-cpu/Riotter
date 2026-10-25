@@ -11,8 +11,8 @@ license.workspace = true
 [dependencies]
 riot_data_core.workspace = true
 riot_data_tiled.workspace = true
-# Only the map definition types (`riot_sim::mapdef`).
-riot_sim.workspace = true
+# The map definition types (`riot_defs::mapdef`), not the simulation.
+riot_defs.workspace = true
 # The ground tileset's PNG.
 miniz_oxide.workspace = true
 

@@ -10,7 +10,11 @@ license.workspace = true
 riot_art.workspace = true
 riot_materials.workspace = true
 riot_sheets.workspace = true
-riot_sim.workspace = true
+# Map definitions only (`riot_defs::mapdef`).
+riot_defs.workspace = true
+
+[dev-dependencies]
+riot_testkit.workspace = true
 
 [lints]
 workspace = true

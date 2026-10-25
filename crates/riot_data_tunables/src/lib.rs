@@ -15,7 +15,7 @@
 use std::fmt;
 use std::path::Path;
 
-use riot_sim::{Command, CommandKind, TUNABLES, Tunables};
+use riot_defs::{Command, CommandKind, TUNABLES, Tunables};
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 

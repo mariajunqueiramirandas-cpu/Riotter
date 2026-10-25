@@ -16,9 +16,9 @@
 //! placed by hashes of map data, so a map always looks the same.
 
 use riot_art::{self as art, Rgb};
+use riot_defs::mapdef::{Ground, MapDef, Polygon, SolidKind};
 use riot_materials::Mat;
 use riot_sheets::{Decal, DecalAtlas};
-use riot_sim::mapdef::{Ground, MapDef, Polygon, SolidKind};
 
 use crate::mesh::{
     self, MeshBuilder, Pass, Rgba, Tex, WHITE, centroid, inset, is_convex, point_in_polygon, rgba,
@@ -979,7 +979,7 @@ mod tests {
 
     #[test]
     fn district_meshes_build() {
-        let map = riot_sim::testkit::district(512.0, 64.0);
+        let map = riot_testkit::district(512.0, 64.0);
         let decals = DecalAtlas::layout();
         let g = build_ground(&map, true, &decals);
         let r = build_roofs(&map, true, &decals);

@@ -18,7 +18,7 @@
 
 use std::path::Path;
 
-use riot_sim::mapdef::{
+use riot_defs::mapdef::{
     AreaDef, EntryDef, EntryKind, Ground, GroundLayer, MapDef, NamedPoint, Polygon, PropDef,
     PropKind, RoadGraph, SolidKind,
 };
@@ -34,7 +34,7 @@ pub use serde_json;
 
 /// Metres per Tiled pixel when the map has no `metres_per_pixel` property.
 pub const DEFAULT_METRES_PER_PIXEL: f64 = 0.25;
-/// Largest map side in metres (`riot_sim::map::LARGEST_MAP`).
+/// Largest map side in metres (`riot_map::LARGEST_MAP`).
 pub const LARGEST_MAP_M: f64 = 8192.0;
 /// Road vertices closer than this (metres) become one graph node.
 pub const ROAD_MERGE_M: f32 = 1.0;
