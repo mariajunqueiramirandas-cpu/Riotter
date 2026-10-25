@@ -1162,13 +1162,23 @@ impl RoadBuilder {
             degree[e[1] as usize] += 1;
         }
         let r2 = ROAD_MERGE_M * ROAD_MERGE_M;
+        let mut index = EdgeIndex::default();
+        for k in 0..self.edges.len() {
+            index.insert(&self.nodes, &self.edges, k);
+        }
+        let mut near = Vec::new();
         for n in 0..self.nodes.len() as u32 {
             if degree[n as usize] != 1 {
                 continue;
             }
             let p = self.nodes[n as usize];
+            // Every edge whose widened box can hold `p`, in edge order, so
+            // the scan below finds what a scan of all edges would.
+            index.near(p, &mut near);
             let mut best: Option<(f32, usize)> = None;
-            for (k, e) in self.edges.iter().enumerate() {
+            for &k in &near {
+                let k = k as usize;
+                let e = self.edges[k];
                 if e[0] == n || e[1] == n {
                     continue;
                 }
@@ -1187,8 +1197,11 @@ impl RoadBuilder {
             }
             if let Some((_, k)) = best {
                 let [a, b] = self.edges[k];
+                index.remove(&self.nodes, &self.edges, k);
                 self.edges[k] = [a, n];
                 self.edges.push([n, b]);
+                index.insert(&self.nodes, &self.edges, k);
+                index.insert(&self.nodes, &self.edges, self.edges.len() - 1);
                 degree[n as usize] += 2;
             }
         }
@@ -1203,6 +1216,85 @@ impl RoadBuilder {
             nodes: self.nodes,
             edges: self.edges,
         }
+    }
+}
+
+/// Road edges by [`EdgeIndex::CELL`] cell of their box widened by
+/// [`ROAD_MERGE_M`], the box `RoadBuilder::finish` tests a dangling end
+/// against. An edge spanning many cells, or with a coordinate that is not
+/// finite, is a candidate everywhere instead.
+#[derive(Default)]
+struct EdgeIndex {
+    cells: std::collections::HashMap<(i32, i32), Vec<u32>>,
+    everywhere: Vec<u32>,
+}
+
+impl EdgeIndex {
+    const CELL: f32 = 64.0;
+    const MAX_CELLS: i64 = 64;
+
+    fn cell(v: f32) -> i32 {
+        (v / Self::CELL).floor() as i32
+    }
+
+    /// The cells of edge `k`'s widened box, or None for "everywhere". The
+    /// box edges are computed exactly as `finish` computes them, and cell
+    /// numbers never decrease with the coordinate, so a point inside the
+    /// box is in one of these cells.
+    fn cells_of(nodes: &[[f32; 2]], e: [u32; 2]) -> Option<(i32, i32, i32, i32)> {
+        let (a, b) = (nodes[e[0] as usize], nodes[e[1] as usize]);
+        if !a.iter().chain(&b).all(|v| v.is_finite()) {
+            return None;
+        }
+        let (x0, x1) = (
+            Self::cell(a[0].min(b[0]) - ROAD_MERGE_M),
+            Self::cell(a[0].max(b[0]) + ROAD_MERGE_M),
+        );
+        let (y0, y1) = (
+            Self::cell(a[1].min(b[1]) - ROAD_MERGE_M),
+            Self::cell(a[1].max(b[1]) + ROAD_MERGE_M),
+        );
+        let n = (x1 as i64 - x0 as i64 + 1) * (y1 as i64 - y0 as i64 + 1);
+        (n <= Self::MAX_CELLS).then_some((x0, x1, y0, y1))
+    }
+
+    fn insert(&mut self, nodes: &[[f32; 2]], edges: &[[u32; 2]], k: usize) {
+        match Self::cells_of(nodes, edges[k]) {
+            None => self.everywhere.push(k as u32),
+            Some((x0, x1, y0, y1)) => {
+                for cy in y0..=y1 {
+                    for cx in x0..=x1 {
+                        self.cells.entry((cx, cy)).or_default().push(k as u32);
+                    }
+                }
+            }
+        }
+    }
+
+    fn remove(&mut self, nodes: &[[f32; 2]], edges: &[[u32; 2]], k: usize) {
+        let k = k as u32;
+        match Self::cells_of(nodes, edges[k as usize]) {
+            None => self.everywhere.retain(|&j| j != k),
+            Some((x0, x1, y0, y1)) => {
+                for cy in y0..=y1 {
+                    for cx in x0..=x1 {
+                        if let Some(list) = self.cells.get_mut(&(cx, cy)) {
+                            list.retain(|&j| j != k);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The edges that may hold `p` in their widened box, ascending.
+    fn near(&self, p: [f32; 2], out: &mut Vec<u32>) {
+        out.clear();
+        out.extend_from_slice(&self.everywhere);
+        if let Some(list) = self.cells.get(&(Self::cell(p[0]), Self::cell(p[1]))) {
+            out.extend_from_slice(list);
+        }
+        out.sort_unstable();
     }
 }
 
@@ -1355,5 +1447,107 @@ mod tests {
         let big = r#"{"name":"metres_per_pixel","type":"float","value":100}"#;
         let e = parse_map(&map_json("", big), "t").unwrap_err().to_string();
         assert!(e.contains("largest supported"), "{e}");
+    }
+
+    /// `finish` before the edge index: every dangling end scans every edge.
+    fn finish_scan(mut b: RoadBuilder) -> RoadGraph {
+        let mut degree = vec![0u32; b.nodes.len()];
+        for e in &b.edges {
+            degree[e[0] as usize] += 1;
+            degree[e[1] as usize] += 1;
+        }
+        let r2 = ROAD_MERGE_M * ROAD_MERGE_M;
+        for n in 0..b.nodes.len() as u32 {
+            if degree[n as usize] != 1 {
+                continue;
+            }
+            let p = b.nodes[n as usize];
+            let mut best: Option<(f32, usize)> = None;
+            for (k, e) in b.edges.iter().enumerate() {
+                if e[0] == n || e[1] == n {
+                    continue;
+                }
+                let (a, c) = (b.nodes[e[0] as usize], b.nodes[e[1] as usize]);
+                if p[0] < a[0].min(c[0]) - ROAD_MERGE_M
+                    || p[0] > a[0].max(c[0]) + ROAD_MERGE_M
+                    || p[1] < a[1].min(c[1]) - ROAD_MERGE_M
+                    || p[1] > a[1].max(c[1]) + ROAD_MERGE_M
+                {
+                    continue;
+                }
+                let d = seg_dist2(p, a, c);
+                if d <= r2 && best.is_none_or(|x| d < x.0) {
+                    best = Some((d, k));
+                }
+            }
+            if let Some((_, k)) = best {
+                let [a, c] = b.edges[k];
+                b.edges[k] = [a, n];
+                b.edges.push([n, c]);
+                degree[n as usize] += 2;
+            }
+        }
+        for e in &mut b.edges {
+            if e[0] > e[1] {
+                e.swap(0, 1);
+            }
+        }
+        b.edges.sort_unstable();
+        b.edges.dedup();
+        RoadGraph {
+            nodes: b.nodes,
+            edges: b.edges,
+        }
+    }
+
+    #[test]
+    fn indexed_road_junctions_match_the_full_scan() {
+        let mut seed = 5u64;
+        let mut next = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 40) as f32 / (1u64 << 24) as f32
+        };
+        for case in 0..40 {
+            // Streets on a jittered grid, some long, plus short spurs whose
+            // far end stops on, short of or past another street.
+            let span = [200.0, 3000.0, 8000.0][case % 3];
+            let mut lines: Vec<(Vec<[f32; 2]>, bool)> = Vec::new();
+            for _ in 0..30 {
+                let (x, y) = (next() * span - span / 2.0, next() * span - span / 2.0);
+                let len = next() * span;
+                let end = if next() < 0.5 {
+                    [x + len, y + next() * 0.4]
+                } else {
+                    [x, y + len]
+                };
+                lines.push((vec![[x, y], end], false));
+            }
+            for _ in 0..60 {
+                let (ref l, _) = lines[(next() * 30.0) as usize];
+                let t = next();
+                let on = [
+                    l[0][0] + (l[1][0] - l[0][0]) * t,
+                    l[0][1] + (l[1][1] - l[0][1]) * t,
+                ];
+                let off = next() * 2.4 - 1.2;
+                let len = 5.0 + next() * 50.0;
+                let (a, b) = if next() < 0.5 {
+                    ([on[0] + off, on[1] + len], [on[0] + off, on[1] + 0.3 * off])
+                } else {
+                    ([on[0] + len, on[1] + off], [on[0] + 0.3 * off, on[1] + off])
+                };
+                lines.push((vec![a, b], next() < 0.1));
+            }
+            let build = || {
+                let mut r = RoadBuilder::default();
+                for (pts, closed) in &lines {
+                    r.polyline(pts, *closed);
+                }
+                r
+            };
+            assert_eq!(build().finish(), finish_scan(build()), "case {case}");
+        }
     }
 }
