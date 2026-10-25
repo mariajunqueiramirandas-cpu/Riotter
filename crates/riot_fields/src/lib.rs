@@ -70,6 +70,18 @@ pub const LAYERS: usize = 14;
 /// Layers one fused blur pass can carry.
 pub const FUSED: usize = 3;
 
+/// A layer's bit in the per-slot layer masks.
+#[inline(always)]
+const fn bit(l: Layer) -> u16 {
+    1 << l as u16
+}
+
+/// Some value is not +0.0.
+#[inline]
+fn any_bits(v: &[f32]) -> bool {
+    v.iter().fold(0u32, |b, &x| b | x.to_bits()) != 0
+}
+
 pub struct Fields {
     pub geom: GridGeom,
     pub cdim: u32,
@@ -97,6 +109,13 @@ pub struct Fields {
     /// clears only those instead of whole layers.
     written: Vec<u16>,
     written_n: Vec<u16>,
+    /// Per slot, one bit per layer ([`bit`]): clear only while every value
+    /// of that layer in the slot is +0.0 (all bits zero). Everything that
+    /// writes a layer sets its bit (`stamp`, `raise_at`, `layer_mut`, the
+    /// scatter); the passes that rewrite whole layers (`filter`, `blur`)
+    /// recompute it. Work on a clear layer that could only reproduce +0.0
+    /// is skipped. Write `data` only through these.
+    live: Vec<u16>,
     /// Chunks to activate at the start of the next update.
     pub want: Vec<u32>,
     pub active: u32,
@@ -127,6 +146,7 @@ impl Fields {
             slot_runs: vec![[0; 2]; pool],
             written: vec![0; pool * CL],
             written_n: vec![0; pool],
+            live: vec![0; pool],
             want: Vec::with_capacity(pool * 4),
             active: 0,
             overflow: 0,
@@ -139,10 +159,36 @@ impl Fields {
         &self.data[o..o + CL]
     }
 
+    /// The layer to write: from now on it may hold anything.
     #[inline]
     pub fn layer_mut(&mut self, slot: usize, l: Layer) -> &mut [f32] {
+        self.live[slot] |= bit(l);
         let o = (slot * LAYERS + l as usize) * CL;
         &mut self.data[o..o + CL]
+    }
+
+    /// Every value of layer `l` in `slot` is +0.0 (`false`: it may not be).
+    #[inline]
+    pub fn is_zero(&self, slot: usize, l: Layer) -> bool {
+        self.live[slot] & bit(l) == 0
+    }
+
+    /// Look at a layer again, so [`Fields::is_zero`] knows if it is +0.0.
+    pub fn refresh_zero(&mut self, slot: usize, l: Layer) {
+        if self.layer(slot, l).iter().all(|v| v.to_bits() == 0) {
+            self.live[slot] &= !bit(l);
+        }
+    }
+
+    /// Set layer `l` to 0.0 in every active chunk. Chunks whose layer is
+    /// already +0.0 throughout are left alone.
+    pub fn clear_layer(&mut self, l: Layer) {
+        for slot in 0..self.pool {
+            if self.slot_chunk[slot] != NO_CHUNK && !self.is_zero(slot, l) {
+                self.layer_mut(slot, l).fill(0.0);
+                self.live[slot] &= !bit(l);
+            }
+        }
     }
 
     #[inline]
@@ -197,6 +243,7 @@ impl Fields {
         self.active += 1;
         let o = slot * LAYERS * CL;
         self.data[o..o + LAYERS * CL].fill(0.0);
+        self.live[slot] = 0;
         self.msg[slot * CL..(slot + 1) * CL].fill(0);
         // Static walkable fraction of each 2 m cell (4 × 4 nav cells).
         let (cx, cy) = (c % self.cdim, c / self.cdim);
@@ -366,6 +413,16 @@ impl Fields {
         let keep = 1.0 - tun.field_blend.clamp(0.0, 1.0);
         let gain = 1.0 - keep;
         let (t_decay, t_officer) = (tun.threat_decay, tun.threat_officer);
+        // Layers this pass may leave holding something other than +0.0:
+        // decay keeps +0.0 at +0.0 unless the factor is negative or NaN.
+        let emo_layers = bit(Layer::Fear) | bit(Layer::Anger) | bit(Layer::Weight);
+        let mut always = 0;
+        if emo_tick && (0.0 * keep).to_bits() != 0 {
+            always |= emo_layers;
+        }
+        if threat_tick && (0.0 * t_decay).to_bits() != 0 {
+            always |= bit(Layer::Threat);
+        }
         let slot_runs = &self.slot_runs;
         let slot_chunk = &self.slot_chunk;
         self.data
@@ -375,11 +432,13 @@ impl Fields {
                     .par_chunks_mut(CL)
                     .zip(self.written_n.par_iter_mut()),
             )
+            .zip(self.live.par_iter_mut())
             .enumerate()
-            .for_each(|(slot, (d, (written, written_n)))| {
+            .for_each(|(slot, ((d, (written, written_n)), live))| {
                 if slot_chunk[slot] == NO_CHUNK {
                     return;
                 }
+                let mut set = always;
                 let (dens, rest) = d.split_at_mut(CL);
                 let (fear, rest) = rest.split_at_mut(CL);
                 let (anger, rest) = rest.split_at_mut(CL);
@@ -437,16 +496,20 @@ impl Fields {
                     injured[cell] = inj as f32;
                     written[*written_n as usize] = cell as u16;
                     *written_n += 1;
+                    set |= bit(Layer::Dens) | bit(Layer::Injured);
                     let civ = n - off;
                     if emo_tick && civ > 0 {
                         fear[cell] += gain * sf as f32 * (1.0 / 255.0);
                         anger[cell] += gain * sa as f32 * (1.0 / 255.0);
                         weight[cell] += gain * civ as f32;
+                        set |= emo_layers;
                     }
                     if threat_tick && seen > 0 {
                         threat[cell] += t_officer * seen as f32;
+                        set |= bit(Layer::Threat);
                     }
                 }
+                *live |= set;
             });
     }
 
@@ -515,8 +578,9 @@ impl Fields {
         let cdim = self.cdim;
         self.data
             .par_chunks_mut(LAYERS * CL)
+            .zip(self.live.par_iter_mut())
             .enumerate()
-            .map(|(slot, d)| {
+            .map(|(slot, (d, live))| {
                 let c = slot_chunk[slot];
                 if c == NO_CHUNK {
                     return 0.0f32;
@@ -578,6 +642,7 @@ impl Fields {
                         *v *= *o;
                     }
                 }
+                *live = (*live & !bit(l)) | if any_bits(out) { bit(l) } else { 0 };
                 out.iter().fold(0.0f32, |m, &v| m.max(v.abs()))
             })
             .reduce(|| 0.0f32, f32::max)
@@ -633,8 +698,9 @@ impl Fields {
         let (tmp, table, slot_chunk) = (&self.tmp, &self.table, &self.slot_chunk);
         self.data
             .par_chunks_mut(LAYERS * CL)
+            .zip(self.live.par_iter_mut())
             .enumerate()
-            .for_each(|(slot, d)| {
+            .for_each(|(slot, (d, live))| {
                 let ch = slot_chunk[slot];
                 if ch == NO_CHUNK {
                     return;
@@ -674,6 +740,7 @@ impl Fields {
                             o[x] = a * (r0[x] + r2[x]) + c * r1[x];
                         }
                     }
+                    *live = (*live & !bit(l)) | if any_bits(out) { bit(l) } else { 0 };
                 }
             });
     }
@@ -790,8 +857,8 @@ impl Probe {
     const EMPTY: u32 = u32::MAX;
     const SLOW: u32 = u32::MAX - 1;
 
-    /// Inlined everywhere: absorb reads seven layers through one probe, and
-    /// the shared offset arithmetic folds away.
+    /// Inlined everywhere: callers read several layers through one probe,
+    /// and the shared offset arithmetic folds away.
     #[inline(always)]
     fn corners(&self, f: &Fields, l: Layer) -> [f32; 4] {
         if self.slot < Probe::SLOW {
@@ -822,10 +889,48 @@ impl Probe {
         if self.slot == Probe::EMPTY {
             return 0.0;
         }
-        let [a, b, c, d] = self.corners(f, l);
-        let top = a + (b - a) * self.tx;
-        let bot = c + (d - c) * self.tx;
-        top + (bot - top) * self.ty
+        bilerp(self.corners(f, l), self.tx, self.ty)
+    }
+
+    /// Where the four cells are in every layer, for reading several layers
+    /// with one bounds check (absorb), and the layers that are not +0.0 in
+    /// all four (the `live` bits of their slots).
+    #[inline(always)]
+    fn cells<'a>(&self, f: &'a Fields) -> (Cells<'a>, u16) {
+        if self.slot < Probe::SLOW {
+            let s = self.slot as usize;
+            let b = s * LAYERS * CL + self.cell as usize;
+            // `cell + CC + 2 <= CL` on the fast path, so this always fits.
+            match f.data[b..].first_chunk::<WINDOW>() {
+                Some(w) => (Cells::Window(w), f.live[s]),
+                None => self.split_cells(f),
+            }
+        } else if self.slot == Probe::SLOW {
+            self.split_cells(f)
+        } else {
+            (Cells::Empty, 0)
+        }
+    }
+
+    /// Each corner's index into `data` at layer 0 (`None` where its chunk
+    /// is inactive): the cells `slow_corners` reads.
+    #[cold]
+    #[inline(never)]
+    fn split_cells<'a>(&self, f: &'a Fields) -> (Cells<'a>, u16) {
+        let mut live = 0;
+        let mut at = |cx: i32, cy: i32| {
+            let s = f.slot_of_chunk(cx.div_euclid(CC as i32), cy.div_euclid(CC as i32))?;
+            let cell = (cy.rem_euclid(CC as i32) as usize) * CC + cx.rem_euclid(CC as i32) as usize;
+            live |= f.live[s];
+            Some(s * LAYERS * CL + cell)
+        };
+        let c = [
+            at(self.x0, self.y0),
+            at(self.x0 + 1, self.y0),
+            at(self.x0, self.y0 + 1),
+            at(self.x0 + 1, self.y0 + 1),
+        ];
+        (Cells::Split(c), live)
     }
 
     /// Gradient per metre.
@@ -838,6 +943,42 @@ impl Probe {
         let gx = (b - a) * (1.0 - self.ty) + (d - c) * self.ty;
         let gy = (c - a) * (1.0 - self.tx) + (d - b) * self.tx;
         Vec2::new(gx, gy) * (1.0 / FIELD_CELL)
+    }
+}
+
+/// Bilinear interpolation of corners `[x0y0, x1y0, x0y1, x1y1]`.
+#[inline(always)]
+fn bilerp([a, b, c, d]: [f32; 4], tx: f32, ty: f32) -> f32 {
+    let top = a + (b - a) * tx;
+    let bot = c + (d - c) * tx;
+    top + (bot - top) * ty
+}
+
+/// Floats from a cell of layer 0 to the cell below and right of it in the
+/// last layer: the four corners of a fast probe in every layer.
+const WINDOW: usize = (LAYERS - 1) * CL + CC + 2;
+
+/// A probe's four cells in every layer (see [`Probe::cells`]).
+#[derive(Clone, Copy)]
+enum Cells<'a> {
+    /// All four in one active chunk: a window of its data.
+    Window(&'a [f32; WINDOW]),
+    /// Straddling chunks: each corner's index at layer 0, if active.
+    Split([Option<usize>; 4]),
+    /// In an inactive chunk: every layer reads 0.
+    Empty,
+}
+
+impl Cells<'_> {
+    /// [`Probe::get`] for layer `l`, without its per-layer lookups.
+    #[inline(always)]
+    fn get(&self, f: &Fields, l: Layer, tx: f32, ty: f32) -> f32 {
+        let o = l as usize * CL;
+        match *self {
+            Cells::Window(w) => bilerp([w[o], w[o + 1], w[o + CC], w[o + CC + 1]], tx, ty),
+            Cells::Split(c) => bilerp(c.map(|i| i.map_or(0.0, |i| f.data[i + o])), tx, ty),
+            Cells::Empty => 0.0,
+        }
     }
 }
 
@@ -915,7 +1056,6 @@ impl AbsorbHarm {
 pub fn absorb(f: &Fields, p: &mut People, sp: &Spatial, ap: &AbsorbParams) -> AbsorbHarm {
     let len = p.len;
     let chunks = p.chunks();
-    let tun = ap.tun;
     let (px, py) = (lanes::flat(&p.pos_x), lanes::flat(&p.pos_y));
     let _ = sp;
     let vx = lanes::flat(&p.vel_x);
@@ -935,114 +1075,166 @@ pub fn absorb(f: &Fields, p: &mut People, sp: &Spatial, ap: &AbsorbParams) -> Ab
                 if i >= len || ss[k][stat::FLAGS] & flag::DEAD != 0 {
                     continue;
                 }
-                let a = &ap.arch[ss[k][stat::ARCH] as usize];
-                let officer = Archetype::from_u8(ss[k][stat::ARCH]).is_officer();
                 let pr = f.probe(px[i], py[i]);
-                let e = &mut es[k];
-                let mut fear = widen_u8(e[emo::FEAR]);
-                let mut anger = widen_u8(e[emo::ANGER]);
-                let mut morale = widen_u8(e[emo::MORALE]);
-                let mut fatigue = widen_u8(e[emo::FATIGUE]);
-                let mut harm = 0.0;
-                let mut gas_harm = 0.0;
-                let w = pr.get(f, Layer::Weight);
-                let threat = (pr.get(f, Layer::Threat) * 0.1).min(1.0);
-                if !officer {
-                    if w > 0.05 {
-                        let inv = 1.0 / w;
-                        let ff = pr.get(f, Layer::Fear) * inv;
-                        let fa = pr.get(f, Layer::Anger) * inv;
-                        fear += tun.contagion_fear * (ff - fear);
-                        // Anger catches more easily than it calms.
-                        let ka = if fa > anger {
-                            tun.contagion_anger
-                        } else {
-                            tun.contagion_anger * 0.3
-                        };
-                        anger += ka * (fa - anger);
-                    }
-                    let chant = pr.get(f, Layer::Chant);
-                    morale += tun.chant_morale * chant.min(2.0);
-                    fear -= 0.5 * tun.chant_morale * chant.min(2.0);
-                    // Police and violence nearby: the timid fear it, the willing are angered.
-                    fear += tun.threat_fear * threat * (1.0 - a.violence);
-                    anger += tun.threat_anger * threat * (a.violence + 0.1);
-                } else if w > 0.05 {
-                    // A hostile crowd frightens officers.
-                    let hostile = pr.get(f, Layer::Anger) / w * (w * 0.25).min(1.0);
-                    fear += tun.threat_fear * 0.5 * hostile * (1.0 - a.violence);
-                }
-                let gas = pr.get(f, Layer::Gas);
-                if gas > 0.01 {
-                    // Officers wear masks: gas barely frightens or tires them.
-                    let g = gas.min(4.0);
-                    fear += tun.gas_fear * g * if officer { 0.03 } else { 1.0 };
-                    fatigue += tun.gas_fatigue * g * if officer { 0.25 } else { 1.0 };
-                    if !officer {
-                        gas_harm = tun.gas_damage * g;
-                        morale -= tun.gas_morale * g;
-                    }
-                    if gas > 0.3 {
-                        ss[k][stat::FLAGS] |= flag::URGENT;
-                    }
-                }
-                let fire = pr.get(f, Layer::Fire);
-                if fire > 0.05 {
-                    // The sampled field bleeds a cell past the flames: it
-                    // frightens there, but only burns inside them.
-                    harm += tun.fire_damage * ((fire - 0.3) * (1.0 / 0.7)).max(0.0);
-                    fear += 0.05 * fire;
-                    ss[k][stat::FLAGS] |= flag::URGENT;
-                }
-                // Relax toward the archetype's baseline.
-                let r = tun.emotion_relax;
-                fear += r * (a.base_fear - fear);
-                anger += r * (a.base_anger - anger);
-                morale -= tun.morale_decay * (0.5 + fear);
-                // Fatigue from moving and heat; rest recovers it.
+                let (tx, ty) = (pr.tx, pr.ty);
                 let speed2 = vx[i] * vx[i] + vy[i] * vy[i];
-                let act = Action::from_u8(ss[k][stat::ACTION]);
-                let mut dfat = tun.fatigue_heat * ap.heat;
-                if speed2 > a.walk * a.walk * 1.44 {
-                    dfat += tun.fatigue_run;
-                } else if speed2 > 0.04 {
-                    dfat += tun.fatigue_walk;
-                } else if act == Action::Rest {
-                    dfat -= tun.rest_recover;
-                } else {
-                    dfat -= tun.rest_recover * 0.25;
+                let (e, st, id) = (&mut es[k], &mut ss[k], ids[i]);
+                // One bounds check for all seven layers on the fast path.
+                let (cells, mut live) = pr.cells(f);
+                // Four +0.0 corners interpolate to exactly +0.0 for weights
+                // in 0..=1, so the probes of layers known +0.0 are skipped;
+                // only NaN weights (a NaN position) would make NaN of them.
+                if tx.is_nan() || ty.is_nan() {
+                    live = u16::MAX;
                 }
-                fatigue += dfat / a.stamina;
-                // Rates are far below one byte step per tick: dither.
-                let bits = roll(ap.seed, ap.tick, ids[i], Stream::Emotion);
-                e[emo::FEAR] = dither_u8(fear, bits);
-                e[emo::ANGER] = dither_u8(anger, bits >> 16);
-                e[emo::MORALE] = dither_u8(morale, bits >> 32);
-                e[emo::FATIGUE] = dither_u8(fatigue, bits >> 48);
-                if harm + gas_harm > 0.0 {
-                    let hp = ss[k][stat::HEALTH];
-                    let bits = roll(ap.seed, ap.tick, ids[i], Stream::Hazard);
-                    // Gas alone wears people down but injures nobody, and
-                    // leaves a margin so a graze is not an injury either.
-                    let gassed = hp
-                        .saturating_sub(harm_units(gas_harm, bits))
-                        .max(hp.min(GAS_FLOOR));
-                    let after = gassed.saturating_sub(harm_units(harm, bits.rotate_left(24)));
-                    out.gas += (hp - gassed) as u32;
-                    out.fire += (gassed - after) as u32;
-                    if hp >= health::INJURED && after < health::INJURED {
-                        if officer {
-                            out.officers_injured += 1;
-                        } else {
-                            out.injured += 1;
-                        }
-                    }
-                    ss[k][stat::HEALTH] = after;
+                match cells {
+                    Cells::Window(w) => react(
+                        |l| {
+                            let o = l as usize * CL;
+                            bilerp([w[o], w[o + 1], w[o + CC], w[o + CC + 1]], tx, ty)
+                        },
+                        live,
+                        e,
+                        st,
+                        speed2,
+                        id,
+                        ap,
+                        &mut out,
+                    ),
+                    cells => react(
+                        |l| cells.get(f, l, tx, ty),
+                        live,
+                        e,
+                        st,
+                        speed2,
+                        id,
+                        ap,
+                        &mut out,
+                    ),
                 }
             }
             out
         })
         .reduce(AbsorbHarm::default, AbsorbHarm::add)
+}
+
+/// One agent of [`absorb`]: `get(l)` is the bilinear sample of layer `l` at
+/// its position, which is +0.0 for the sparse layers (gas, fire, chants)
+/// whose bit in `live` is clear; `speed2` is its squared speed.
+#[inline(always)]
+fn react(
+    get: impl Fn(Layer) -> f32,
+    live: u16,
+    e: &mut [u8; 4],
+    st: &mut [u8; 4],
+    speed2: f32,
+    id: u32,
+    ap: &AbsorbParams,
+    out: &mut AbsorbHarm,
+) {
+    let tun = ap.tun;
+    let a = &ap.arch[st[stat::ARCH] as usize];
+    let officer = Archetype::from_u8(st[stat::ARCH]).is_officer();
+    let mut fear = widen_u8(e[emo::FEAR]);
+    let mut anger = widen_u8(e[emo::ANGER]);
+    let mut morale = widen_u8(e[emo::MORALE]);
+    let mut fatigue = widen_u8(e[emo::FATIGUE]);
+    let mut harm = 0.0;
+    let mut gas_harm = 0.0;
+    let sparse = |l: Layer| if live & bit(l) == 0 { 0.0 } else { get(l) };
+    let w = get(Layer::Weight);
+    let threat = (get(Layer::Threat) * 0.1).min(1.0);
+    if !officer {
+        if w > 0.05 {
+            let inv = 1.0 / w;
+            let ff = get(Layer::Fear) * inv;
+            let fa = get(Layer::Anger) * inv;
+            fear += tun.contagion_fear * (ff - fear);
+            // Anger catches more easily than it calms.
+            let ka = if fa > anger {
+                tun.contagion_anger
+            } else {
+                tun.contagion_anger * 0.3
+            };
+            anger += ka * (fa - anger);
+        }
+        let chant = sparse(Layer::Chant);
+        morale += tun.chant_morale * chant.min(2.0);
+        fear -= 0.5 * tun.chant_morale * chant.min(2.0);
+        // Police and violence nearby: the timid fear it, the willing are angered.
+        fear += tun.threat_fear * threat * (1.0 - a.violence);
+        anger += tun.threat_anger * threat * (a.violence + 0.1);
+    } else if w > 0.05 {
+        // A hostile crowd frightens officers.
+        let hostile = get(Layer::Anger) / w * (w * 0.25).min(1.0);
+        fear += tun.threat_fear * 0.5 * hostile * (1.0 - a.violence);
+    }
+    let gas = sparse(Layer::Gas);
+    if gas > 0.01 {
+        // Officers wear masks: gas barely frightens or tires them.
+        let g = gas.min(4.0);
+        fear += tun.gas_fear * g * if officer { 0.03 } else { 1.0 };
+        fatigue += tun.gas_fatigue * g * if officer { 0.25 } else { 1.0 };
+        if !officer {
+            gas_harm = tun.gas_damage * g;
+            morale -= tun.gas_morale * g;
+        }
+        if gas > 0.3 {
+            st[stat::FLAGS] |= flag::URGENT;
+        }
+    }
+    let fire = sparse(Layer::Fire);
+    if fire > 0.05 {
+        // The sampled field bleeds a cell past the flames: it
+        // frightens there, but only burns inside them.
+        harm += tun.fire_damage * ((fire - 0.3) * (1.0 / 0.7)).max(0.0);
+        fear += 0.05 * fire;
+        st[stat::FLAGS] |= flag::URGENT;
+    }
+    // Relax toward the archetype's baseline.
+    let r = tun.emotion_relax;
+    fear += r * (a.base_fear - fear);
+    anger += r * (a.base_anger - anger);
+    morale -= tun.morale_decay * (0.5 + fear);
+    // Fatigue from moving and heat; rest recovers it.
+    let act = Action::from_u8(st[stat::ACTION]);
+    let mut dfat = tun.fatigue_heat * ap.heat;
+    if speed2 > a.walk * a.walk * 1.44 {
+        dfat += tun.fatigue_run;
+    } else if speed2 > 0.04 {
+        dfat += tun.fatigue_walk;
+    } else if act == Action::Rest {
+        dfat -= tun.rest_recover;
+    } else {
+        dfat -= tun.rest_recover * 0.25;
+    }
+    fatigue += dfat / a.stamina;
+    // Rates are far below one byte step per tick: dither.
+    let bits = roll(ap.seed, ap.tick, id, Stream::Emotion);
+    e[emo::FEAR] = dither_u8(fear, bits);
+    e[emo::ANGER] = dither_u8(anger, bits >> 16);
+    e[emo::MORALE] = dither_u8(morale, bits >> 32);
+    e[emo::FATIGUE] = dither_u8(fatigue, bits >> 48);
+    if harm + gas_harm > 0.0 {
+        let hp = st[stat::HEALTH];
+        let bits = roll(ap.seed, ap.tick, id, Stream::Hazard);
+        // Gas alone wears people down but injures nobody, and
+        // leaves a margin so a graze is not an injury either.
+        let gassed = hp
+            .saturating_sub(harm_units(gas_harm, bits))
+            .max(hp.min(GAS_FLOOR));
+        let after = gassed.saturating_sub(harm_units(harm, bits.rotate_left(24)));
+        out.gas += (hp - gassed) as u32;
+        out.fire += (gassed - after) as u32;
+        if hp >= health::INJURED && after < health::INJURED {
+            if officer {
+                out.officers_injured += 1;
+            } else {
+                out.injured += 1;
+            }
+        }
+        st[stat::HEALTH] = after;
+    }
 }
 
 #[cfg(test)]

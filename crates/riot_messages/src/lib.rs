@@ -76,11 +76,7 @@ pub fn set_chant(w: &mut World, organizer: u32, on: bool) {
 /// of their own stamina (DESIGN §2.4).
 pub fn stamp_chants(w: &mut World) {
     if w.msgs.chant_live {
-        for slot in 0..w.fields.pool {
-            if w.fields.slot_chunk[slot] != NO_CHUNK {
-                w.fields.layer_mut(slot, Layer::Chant).fill(0.0);
-            }
-        }
+        w.fields.clear_layer(Layer::Chant);
         w.msgs.chant_live = false;
     }
     let r = w.tun.chant_radius;
