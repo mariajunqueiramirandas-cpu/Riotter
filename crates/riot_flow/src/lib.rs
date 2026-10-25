@@ -148,16 +148,21 @@ pub struct FlowSystem {
     /// heads straight for. A node key `(tile << 2) | comp`, `ANCHOR_TARGET |
     /// k` for goal target `k`, or `NONE`.
     pub page_anchor: Vec<u32>,
-    /// Costs before the latest recompute, to detect what changed.
-    page_prev: Vec<u32>,
     /// Cost of entering each tile, refreshed with the costs.
     page_step: Vec<u32>,
     /// Epoch at which each tile's costs (or a neighbour's) last changed
     /// noticeably: its flow tile is stale if built before that.
     pub page_epoch: Vec<u32>,
     page_region: Vec<u32>,
-    /// Dial's bucket queue (DESIGN §9).
-    dial: Vec<Vec<u32>>,
+    /// The tile searches of this tick's recomputes (see
+    /// [`FlowSystem::tile_dijkstras`]).
+    work: [DialWork; MAX_RECOMPUTES_PER_TICK],
+    /// Their pages, densely in page-list order, one goal after the other:
+    /// cost and anchor per tile component, step cost and change mark per
+    /// tile.
+    dense_node: Vec<[u32; 2]>,
+    dense_step: Vec<u32>,
+    dense_mark: Vec<bool>,
     pub page_flow: Vec<u32>,
     pub page_free: Vec<u32>,
     pub meta: Vec<FlowMeta>,
@@ -172,8 +177,91 @@ pub struct FlowSystem {
     /// Requests and usage from steering, one buffer per agent chunk.
     pub records: Vec<Vec<u64>>,
     pub stats: FlowStats,
-    /// Step costs of one goal's pages, in page-list order.
-    step_scratch: Vec<u32>,
+}
+
+/// One goal's tile search of this tick, on its pages in the dense arrays.
+struct DialWork {
+    goal: u8,
+    /// The goal's first page in the dense arrays, and its page count.
+    base: usize,
+    n: usize,
+    /// Region → index of its page in the goal's page list: `NONE` outside
+    /// the corridor, and everywhere between recomputes.
+    kof: Vec<u32>,
+    queue: Dial,
+}
+
+impl DialWork {
+    fn new(map: &Map) -> Self {
+        DialWork {
+            goal: 0,
+            base: 0,
+            n: 0,
+            kof: vec![NONE; (map.rdim * map.rdim) as usize],
+            queue: Dial {
+                buckets: (0..DIAL_BUCKETS).map(|_| Vec::with_capacity(128)).collect(),
+                full: [0; DIAL_BUCKETS / 64],
+            },
+        }
+    }
+}
+
+/// Dial's bucket queue (DESIGN §9): bucket `cost % DIAL_BUCKETS` holds the
+/// nodes queued at `cost`, with a bit per non-empty bucket.
+struct Dial {
+    buckets: Vec<Vec<u32>>,
+    full: [u64; DIAL_BUCKETS / 64],
+}
+
+impl Dial {
+    #[inline(always)]
+    fn push(&mut self, cost: u32, node: u32) {
+        let b = cost as usize & (DIAL_BUCKETS - 1);
+        self.buckets[b].push(node);
+        self.full[b >> 6] |= 1 << (b & 63);
+    }
+
+    /// Take bucket `b`'s nodes; [`Dial::put`] returns the emptied buffer.
+    #[inline(always)]
+    fn take(&mut self, b: usize) -> Vec<u32> {
+        self.full[b >> 6] &= !(1 << (b & 63));
+        std::mem::take(&mut self.buckets[b])
+    }
+
+    #[inline(always)]
+    fn put(&mut self, b: usize, mut items: Vec<u32>) {
+        items.clear();
+        self.buckets[b] = items;
+    }
+
+    fn clear(&mut self) {
+        for (w, bits) in self.full.iter_mut().enumerate() {
+            while *bits != 0 {
+                let b = w * 64 + bits.trailing_zeros() as usize;
+                *bits &= *bits - 1;
+                self.buckets[b].clear();
+            }
+        }
+    }
+
+    /// How many buckets from `b`, going round, the next non-empty one is:
+    /// the empty buckets a scan one cost at a time would step over.
+    #[inline(always)]
+    fn skip(&self, b: usize) -> Option<u32> {
+        let (w, s) = (b >> 6, b & 63);
+        let here = self.full[w] >> s;
+        if here != 0 {
+            return Some(here.trailing_zeros());
+        }
+        for k in 1..=DIAL_BUCKETS / 64 {
+            let wk = (w + k) & (DIAL_BUCKETS / 64 - 1);
+            let bits = self.full[wk];
+            if bits != 0 {
+                return Some((k * 64 - s) as u32 + bits.trailing_zeros());
+            }
+        }
+        None
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -222,11 +310,15 @@ impl FlowSystem {
             goals: (0..MAX_GOALS).map(|_| make_goal()).collect(),
             page_cost: vec![INF; pages * PAGE_COST],
             page_anchor: vec![NONE; pages * PAGE_COST],
-            page_prev: vec![INF; pages * PAGE_COST],
             page_step: vec![TILE_STEP; pages * PAGE_TILES],
             page_epoch: vec![0; pages * PAGE_TILES],
             page_region: vec![NONE; pages],
-            dial: (0..DIAL_BUCKETS).map(|_| Vec::with_capacity(128)).collect(),
+            work: std::array::from_fn(|_| DialWork::new(map)),
+            // Zeroed, so memory is only touched as far as corridors reach:
+            // every recompute resets the part it uses.
+            dense_node: vec![[0; 2]; pages * PAGE_COST],
+            dense_step: vec![0; pages * PAGE_TILES],
+            dense_mark: vec![false; pages * PAGE_TILES],
             page_flow: vec![NONE; pages * PAGE_TILES],
             page_free: (0..pages as u32).rev().collect(),
             meta: vec![meta; flow_tiles],
@@ -245,7 +337,6 @@ impl FlowSystem {
             merged: Vec::with_capacity(agent_chunks * 512),
             records: (0..agent_chunks).map(|_| Vec::with_capacity(512)).collect(),
             stats: FlowStats::default(),
-            step_scratch: vec![TILE_STEP; pages * PAGE_TILES],
         }
     }
 
@@ -555,7 +646,9 @@ impl FlowSystem {
         }
         self.merged = merged;
 
-        // 3. Corridors and tile costs.
+        // 3. Corridors and tile costs: region searches and corridor growth
+        // goal by goal (they share the heap and the page pool), then the
+        // tile searches of all of them at once.
         let mut recomputes = 0;
         for g in 0..MAX_GOALS {
             let goal = &self.goals[g];
@@ -570,10 +663,12 @@ impl FlowSystem {
             if (goal.dirty || !goal.want_regions.is_empty() || due)
                 && recomputes < MAX_RECOMPUTES_PER_TICK
             {
-                self.recompute(map, fields, tun, g as u8, tick);
+                self.recompute(map, g as u8, tick);
+                self.work[recomputes].goal = g as u8;
                 recomputes += 1;
             }
         }
+        self.tile_dijkstras(map, fields, tun, recomputes);
 
         // 4. Build the new jobs in parallel, then copy them into their slots.
         let n = self.new_jobs.len();
@@ -672,8 +767,9 @@ impl FlowSystem {
         None
     }
 
-    /// Region Dijkstra (if needed), corridor growth and the tile Dijkstra.
-    fn recompute(&mut self, map: &Map, fields: &Fields, tun: &Tunables, g: u8, tick: u32) {
+    /// Region Dijkstra (if needed) and corridor growth; the tile Dijkstra
+    /// follows in [`FlowSystem::tile_dijkstras`].
+    fn recompute(&mut self, map: &Map, g: u8, tick: u32) {
         self.stats.recomputes += 1;
         let gi = g as usize;
         if !self.goals[gi].region_ready {
@@ -708,7 +804,6 @@ impl FlowSystem {
         goal.version += 1;
         goal.dirty = false;
         goal.last_refresh = tick;
-        self.tile_dijkstra(map, fields, tun, g);
     }
 
     fn add_corridor_region(&mut self, map: &Map, g: u8, reg: u32) {
@@ -732,7 +827,6 @@ impl FlowSystem {
             goal.pages[r] = p;
             goal.page_list.push(p);
             self.page_region[p as usize] = r as u32;
-            self.page_prev[p as usize * PAGE_COST..(p as usize + 1) * PAGE_COST].fill(INF);
             self.page_epoch[p as usize * PAGE_TILES..(p as usize + 1) * PAGE_TILES].fill(0);
             self.page_cost[p as usize * PAGE_COST..(p as usize + 1) * PAGE_COST].fill(INF);
             self.page_anchor[p as usize * PAGE_COST..(p as usize + 1) * PAGE_COST].fill(NONE);
@@ -829,290 +923,365 @@ impl FlowSystem {
         goal.region_ready = true;
     }
 
-    /// Any-angle Dijkstra over tile components restricted to the corridor,
-    /// with Dial's bucket queue over integer costs (DESIGN §9).
+    /// The tile searches of this tick's `n` recomputes (`self.work[..n]`,
+    /// see [`tile_dijkstra`]).
     ///
-    /// Costs are Theta*-style (Nash, Daniel, Koenig and Felner, "Theta*:
-    /// Any-Angle Path Planning on Grids", 2007): every node keeps an anchor,
-    /// the last point its route turns at, and a node that sees its
-    /// neighbour's anchor across open tiles takes the straight-line cost to
-    /// it instead of a grid step. Line of sight is propagated, not traced: a
-    /// node sees anchor `A` when the tile its centre-to-`A` line enters
-    /// first is fully open and already sees `A`, so the test costs one
-    /// lookup. The straight segment is charged each tile's own penalty, so
-    /// crowds and gas still bend routes. Steps are 8-connected where the
-    /// four tiles involved are open.
-    ///
-    /// Tiles whose costs changed noticeably, and their neighbours, get the
-    /// new epoch so their flow tiles are rebuilt; everything else keeps its
-    /// flow.
-    fn tile_dijkstra(&mut self, map: &Map, fields: &Fields, tun: &Tunables, g: u8) {
-        let gi = g as usize;
-        let epoch = self.goals[gi].version;
-        // Step costs, one page per task (a pure function of the fields),
-        // into scratch in page-list order, then into place.
+    /// A search reads and writes only its own goal's pages, and only
+    /// through the goal's corridor, so the searches of different goals are
+    /// independent. Each runs as its own task on a dense copy of its pages
+    /// (in page-list order, with a region → index table), and the results
+    /// go back into the pages afterwards. First the step costs, a pure
+    /// function of the fields, are computed one page per task.
+    fn tile_dijkstras(&mut self, map: &Map, fields: &Fields, tun: &Tunables, n: usize) {
+        if n == 0 {
+            return;
+        }
+        let mut total = 0;
+        for (k, w) in self.work.iter_mut().enumerate() {
+            w.base = total;
+            w.n = 0;
+            if k < n {
+                let goal = &self.goals[w.goal as usize];
+                w.n = goal.page_list.len();
+                for (i, &p) in goal.page_list.iter().enumerate() {
+                    w.kof[self.page_region[p as usize] as usize] = i as u32;
+                }
+            }
+            total += w.n;
+        }
+        // Step costs, and fresh costs, anchors and marks, one page per task.
         {
-            let n = self.goals[gi].page_list.len();
-            let page_list = &self.goals[gi].page_list;
-            let page_region = &self.page_region;
-            self.step_scratch[..n * PAGE_TILES]
+            let (goals, work, page_region) = (&self.goals, &self.work, &self.page_region);
+            self.dense_step[..total * PAGE_TILES]
                 .par_chunks_mut(PAGE_TILES)
+                .zip(self.dense_node[..total * PAGE_COST].par_chunks_mut(PAGE_COST))
+                .zip(self.dense_mark[..total * PAGE_TILES].par_chunks_mut(PAGE_TILES))
                 .enumerate()
-                .for_each(|(k, out)| {
-                    let r = page_region[page_list[k] as usize];
+                .for_each(|(d, ((step, node), mark))| {
+                    let w = &work[(d >= work[0].n) as usize];
+                    let g = w.goal;
+                    let p = goals[g as usize].page_list[d - w.base];
+                    let r = page_region[p as usize];
                     let (rx, ry) = (r % map.rdim, r / map.rdim);
-                    for (local, o) in out.iter_mut().enumerate() {
+                    for (local, s) in step.iter_mut().enumerate() {
                         let local = local as u32;
                         let t = map
                             .tile_index(rx * REGION + local % REGION, ry * REGION + local / REGION);
-                        *o = tile_step_cost(map, fields, tun, t, g < GOAL_POLICE);
+                        *s = tile_step_cost(map, fields, tun, t, g < GOAL_POLICE);
                     }
+                    node.fill([INF, NONE]);
+                    mark.fill(false);
                 });
         }
-        for (k, &p) in self.goals[gi].page_list.iter().enumerate() {
-            let (a, b) = (p as usize * PAGE_COST, (p as usize + 1) * PAGE_COST);
-            self.page_prev[a..b].copy_from_slice(&self.page_cost[a..b]);
-            self.page_cost[a..b].fill(INF);
-            self.page_anchor[a..b].fill(NONE);
-            self.page_step[p as usize * PAGE_TILES..(p as usize + 1) * PAGE_TILES]
-                .copy_from_slice(&self.step_scratch[k * PAGE_TILES..(k + 1) * PAGE_TILES]);
+        // The searches, one task per goal.
+        {
+            let (goals, page_region, page_cost) = (&self.goals, &self.page_region, &self.page_cost);
+            let [w0, w1] = &mut self.work;
+            let split = w0.n;
+            let (node0, node1) =
+                self.dense_node[..total * PAGE_COST].split_at_mut(split * PAGE_COST);
+            let (step0, step1) = self.dense_step[..total * PAGE_TILES].split_at(split * PAGE_TILES);
+            let (mark0, mark1) =
+                self.dense_mark[..total * PAGE_TILES].split_at_mut(split * PAGE_TILES);
+            let mut tasks = [(w0, node0, step0, mark0), (w1, node1, step1, mark1)];
+            tasks[..n].par_iter_mut().for_each(|(w, node, step, mark)| {
+                let goal = &goals[w.goal as usize];
+                tile_dijkstra(map, goal, page_region, page_cost, w, node, step, mark);
+            });
         }
-        let goal = &self.goals[gi];
-        let page_cost = &mut self.page_cost;
-        let page_anchor = &mut self.page_anchor;
-        let page_step = &self.page_step;
-        let dial = &mut self.dial;
-        for b in dial.iter_mut() {
-            b.clear();
-        }
-        let page_of = |t: u32| -> Option<(usize, usize)> {
-            let page = goal.pages[map.region_of_tile(t) as usize];
-            if page == NONE {
-                return None;
+        // Back into the pages.
+        for w in &mut self.work[..n] {
+            let goal = &self.goals[w.goal as usize];
+            let epoch = goal.version;
+            for (i, &p) in goal.page_list.iter().enumerate() {
+                let (p, d) = (p as usize, w.base + i);
+                let node = &self.dense_node[d * PAGE_COST..(d + 1) * PAGE_COST];
+                let cost = &mut self.page_cost[p * PAGE_COST..(p + 1) * PAGE_COST];
+                let anchor = &mut self.page_anchor[p * PAGE_COST..(p + 1) * PAGE_COST];
+                for ((c, a), &[nc, na]) in cost.iter_mut().zip(anchor.iter_mut()).zip(node) {
+                    *c = nc;
+                    *a = na;
+                }
+                self.page_step[p * PAGE_TILES..(p + 1) * PAGE_TILES]
+                    .copy_from_slice(&self.dense_step[d * PAGE_TILES..(d + 1) * PAGE_TILES]);
+                let epochs = &mut self.page_epoch[p * PAGE_TILES..(p + 1) * PAGE_TILES];
+                let marks = &self.dense_mark[d * PAGE_TILES..(d + 1) * PAGE_TILES];
+                for (e, &m) in epochs.iter_mut().zip(marks) {
+                    if m {
+                        *e = epoch;
+                    }
+                }
+                w.kof[self.page_region[p] as usize] = NONE;
             }
-            let (tx, ty) = (t & (map.tdim - 1), t >> map.tshift);
-            Some((
-                page as usize,
-                ((ty % REGION) * REGION + tx % REGION) as usize,
-            ))
-        };
-        let idx = |t: u32, c: u8| page_of(t).map(|(p, l)| p * PAGE_COST + l * 4 + c as usize);
-        let mut pending = 0usize;
-        Self::for_each_source(map, goal, |t, c, k| {
-            if let Some(i) = idx(t, c)
-                && page_cost[i] != 0
-            {
-                page_cost[i] = 0;
-                page_anchor[i] = ANCHOR_TARGET | k;
-                dial[0].push((t << 2) | c as u32);
+        }
+    }
+}
+
+const _: () = assert!(MAX_RECOMPUTES_PER_TICK == 2);
+
+/// Any-angle Dijkstra over tile components restricted to the corridor,
+/// with Dial's bucket queue over integer costs (DESIGN §9).
+///
+/// Costs are Theta*-style (Nash, Daniel, Koenig and Felner, "Theta*:
+/// Any-Angle Path Planning on Grids", 2007): every node keeps an anchor,
+/// the last point its route turns at, and a node that sees its
+/// neighbour's anchor across open tiles takes the straight-line cost to
+/// it instead of a grid step. Line of sight is propagated, not traced: a
+/// node sees anchor `A` when the tile its centre-to-`A` line enters
+/// first is fully open and already sees `A`, so the test costs one
+/// lookup. The straight segment is charged each tile's own penalty, so
+/// crowds and gas still bend routes. Steps are 8-connected where the
+/// four tiles involved are open.
+///
+/// Tiles whose costs changed noticeably, and their neighbours, get marked
+/// for the new epoch so their flow tiles are rebuilt; everything else
+/// keeps its flow.
+///
+/// Works on the goal's pages in the dense arrays: `node` (cost and anchor
+/// per tile component), `step` and `mark` hold them in page-list order,
+/// and `w.kof` gives a region's index. `page_cost` still holds the costs
+/// from before, to see what changed.
+#[allow(clippy::too_many_arguments)]
+fn tile_dijkstra(
+    map: &Map,
+    goal: &Goal,
+    page_region: &[u32],
+    page_cost: &[u32],
+    w: &mut DialWork,
+    node: &mut [[u32; 2]],
+    step: &[u32],
+    mark: &mut [bool],
+) {
+    let DialWork { kof, queue: q, .. } = w;
+    let kof: &[u32] = kof;
+    q.clear();
+    let (rdim, tdim) = (map.rdim, map.tdim);
+    // Dense index of tile (x, y), if it is in the corridor: its page's
+    // index × PAGE_TILES + its index in the page.
+    let at = |x: u32, y: u32| -> Option<usize> {
+        let k = kof[((y >> 4) * rdim + (x >> 4)) as usize];
+        (k != NONE).then(|| k as usize * PAGE_TILES + (((y & 15) << 4) | (x & 15)) as usize)
+    };
+    let mut pending = 0usize;
+    FlowSystem::for_each_source(map, goal, |t, c, k| {
+        let (tx, ty) = (t & (tdim - 1), t >> map.tshift);
+        if let Some(d) = at(tx, ty) {
+            let i = d * 4 + c as usize;
+            if node[i][0] != 0 {
+                node[i] = [0, ANCHOR_TARGET | k];
+                q.push(0, (t << 2) | c as u32);
                 pending += 1;
             }
-        });
-        let tdim = map.tdim;
-        let in_map = |x: i32, y: i32| x >= 0 && y >= 0 && x < tdim as i32 && y < tdim as i32;
-        // A fully open tile in the corridor: lines of sight may cross it.
-        let clear = |x: i32, y: i32| {
-            in_map(x, y) && {
-                let t = map.tile_index(x as u32, y as u32);
-                map.tiles[t as usize] == OPEN && page_of(t).is_some()
-            }
+        }
+    });
+    let in_map = |x: i32, y: i32| x >= 0 && y >= 0 && x < tdim as i32 && y < tdim as i32;
+    // A fully open tile in the corridor: lines of sight may cross it.
+    let clear = |x: i32, y: i32| {
+        in_map(x, y)
+            && map.tiles[map.tile_index(x as u32, y as u32) as usize] == OPEN
+            && at(x as u32, y as u32).is_some()
+    };
+    let mut cur = 0u32;
+    while pending > 0 {
+        // Straight to the next non-empty bucket.
+        let Some(gap) = q.skip(cur as usize & (DIAL_BUCKETS - 1)) else {
+            break;
         };
-        let mut cur = 0u32;
-        while pending > 0 {
-            let b = cur as usize & (DIAL_BUCKETS - 1);
-            if dial[b].is_empty() {
-                cur += 1;
+        cur += gap;
+        let b = cur as usize & (DIAL_BUCKETS - 1);
+        let items = q.take(b);
+        for &key in &items {
+            pending -= 1;
+            let (t, c) = (key >> 2, (key & 3) as u8);
+            let (tx, ty) = (t & (tdim - 1), t >> map.tshift);
+            let Some(d) = at(tx, ty) else { continue };
+            let i = d * 4 + c as usize;
+            if node[i][0] != cur {
                 continue;
             }
-            let items = std::mem::take(&mut dial[b]);
-            for &key in &items {
-                pending -= 1;
-                let (t, c) = (key >> 2, (key & 3) as u8);
-                let Some(i) = idx(t, c) else { continue };
-                if page_cost[i] != cur {
-                    continue;
-                }
-                let (tx, ty) = (t & (tdim - 1), t >> map.tshift);
-                let here_open = map.tiles[t as usize] == OPEN;
-                let anchor = page_anchor[i];
-                let sight = anchor_at(map, goal, anchor);
-                // A grid step's anchor: this tile's centre when routes can
-                // head for it, otherwise the neighbour itself.
-                let step_anchor = if here_open { key } else { NONE };
-                // Diagonal steps matter where routes turn, near their
-                // anchor; along a straight run the neighbours' own lines of
-                // sight already give the diagonal tiles their cost.
-                let turning = here_open
-                    && sight.is_none_or(|(a, _)| {
-                        (a - tile_centre(map, t)).len2() < (1.5 * TILE_M) * (1.5 * TILE_M)
-                    });
-                let steps = if turning {
-                    &TILE_STEPS[..]
+            let here_kind = map.tiles[t as usize];
+            let here_open = here_kind == OPEN;
+            let anchor = node[i][1];
+            let sight = anchor_at(map, goal, anchor);
+            // A grid step's anchor: this tile's centre when routes can
+            // head for it, otherwise the neighbour itself.
+            let step_anchor = if here_open { key } else { NONE };
+            // Diagonal steps matter where routes turn, near their
+            // anchor; along a straight run the neighbours' own lines of
+            // sight already give the diagonal tiles their cost.
+            let turning = here_open
+                && sight.is_none_or(|(a, _)| {
+                    (a - tile_centre(map, t)).len2() < (1.5 * TILE_M) * (1.5 * TILE_M)
+                });
+            let steps = if turning {
+                &TILE_STEPS[..]
+            } else {
+                &TILE_STEPS[..4]
+            };
+            let (lx, ly) = ((tx % REGION) as i32, (ty % REGION) as i32);
+            for (dir, &(dx, dy)) in steps.iter().enumerate() {
+                let (nx, ny) = (tx as i32 + dx, ty as i32 + dy);
+                // Within the region the neighbour is on the same page.
+                let nd = if ((lx + dx) as u32) < REGION && ((ly + dy) as u32) < REGION {
+                    (d as i32 + dy * REGION as i32 + dx) as usize
                 } else {
-                    &TILE_STEPS[..4]
-                };
-                for &(dx, dy) in steps {
-                    let (nx, ny) = (tx as i32 + dx, ty as i32 + dy);
                     if !in_map(nx, ny) {
                         continue;
                     }
-                    let diagonal = dx != 0 && dy != 0;
-                    let nt = map.tile_index(nx as u32, ny as u32);
-                    let Some((np, nl)) = page_of(nt) else {
+                    let Some(nd) = at(nx as u32, ny as u32) else {
                         continue;
                     };
-                    let nt_open = map.tiles[nt as usize] == OPEN;
-                    // An open tile has one component; once it is expanded
-                    // nothing here can improve it.
-                    let j0 = np * PAGE_COST + nl * 4;
-                    if nt_open && page_cost[j0] <= cur {
-                        continue;
-                    }
-                    if diagonal
-                        && !(nt_open
-                            && clear(tx as i32 + dx, ty as i32)
-                            && clear(tx as i32, ty as i32 + dy))
-                    {
-                        continue;
-                    }
-                    let step = page_step[np * PAGE_TILES + nl].min(MAX_STEP);
-                    let grid = cur
-                        + if diagonal {
-                            step * DIAG_256 / 256
-                        } else {
-                            step
-                        };
-                    // Straight on from this node's anchor, when the
-                    // neighbour sees it. A neighbour already heading for
-                    // the same anchor has exactly that cost.
-                    let straight = match sight {
-                        Some((a, r)) if nt_open && page_anchor[j0] != anchor => {
-                            let target = anchor & ANCHOR_TARGET != 0;
-                            // The cost and distance to the anchor of the
-                            // tile the line enters first.
-                            let via = match toward(map, nx as u32, ny as u32, a) {
-                                None => target.then_some((0, 0.0)),
-                                Some((ex, ey)) => {
-                                    let (px, py) = (nx + ex, ny + ey);
-                                    let corner_ok = ex == 0
-                                        || ey == 0
-                                        || (clear(nx + ex, ny) && clear(nx, ny + ey));
-                                    if corner_ok && clear(px, py) {
-                                        let pt = map.tile_index(px as u32, py as u32);
-                                        idx(pt, 0)
-                                            .filter(|&q| {
-                                                (page_anchor[q] == anchor || pt << 2 == anchor)
-                                                    && page_cost[q] <= cur
-                                            })
-                                            .map(|q| {
-                                                // A goal tile costs 0 however
-                                                // far its centre is from the disc.
-                                                let d = if target && page_cost[q] == 0 {
-                                                    0.0
-                                                } else {
-                                                    anchor_dist(a, r, tile_centre(map, pt))
-                                                };
-                                                (page_cost[q], d)
-                                            })
-                                    } else {
-                                        None
-                                    }
+                    nd
+                };
+                let diagonal = dx != 0 && dy != 0;
+                let nt = map.tile_index(nx as u32, ny as u32);
+                let nt_kind = map.tiles[nt as usize];
+                let nt_open = nt_kind == OPEN;
+                // An open tile has one component; once it is expanded
+                // nothing here can improve it.
+                let j0 = nd * 4;
+                if nt_open && node[j0][0] <= cur {
+                    continue;
+                }
+                if diagonal
+                    && !(nt_open
+                        && clear(tx as i32 + dx, ty as i32)
+                        && clear(tx as i32, ty as i32 + dy))
+                {
+                    continue;
+                }
+                let st = step[nd].min(MAX_STEP);
+                let grid = cur + if diagonal { st * DIAG_256 / 256 } else { st };
+                // Straight on from this node's anchor, when the
+                // neighbour sees it. A neighbour already heading for
+                // the same anchor has exactly that cost.
+                let straight = match sight {
+                    Some((a, r)) if nt_open && node[j0][1] != anchor => {
+                        let target = anchor & ANCHOR_TARGET != 0;
+                        // The cost and distance to the anchor of the
+                        // tile the line enters first.
+                        let via = match toward(map, nx as u32, ny as u32, a) {
+                            None => target.then_some((0, 0.0)),
+                            Some((ex, ey)) => {
+                                let (px, py) = (nx + ex, ny + ey);
+                                let corner_ok = ex == 0
+                                    || ey == 0
+                                    || (clear(nx + ex, ny) && clear(nx, ny + ey));
+                                if corner_ok && clear(px, py) {
+                                    let pt = map.tile_index(px as u32, py as u32);
+                                    at(px as u32, py as u32)
+                                        .map(|pd| pd * 4)
+                                        .filter(|&pq| {
+                                            (node[pq][1] == anchor || pt << 2 == anchor)
+                                                && node[pq][0] <= cur
+                                        })
+                                        .map(|pq| {
+                                            // A goal tile costs 0 however
+                                            // far its centre is from the disc.
+                                            let dist = if target && node[pq][0] == 0 {
+                                                0.0
+                                            } else {
+                                                anchor_dist(a, r, tile_centre(map, pt))
+                                            };
+                                            (node[pq][0], dist)
+                                        })
+                                } else {
+                                    None
                                 }
-                            };
-                            via.map(|(base, from)| {
-                                // Metres × 20 units/m × step/160, each end
-                                // rounded on its own: along a uniform line the
-                                // roundings cancel instead of adding up.
-                                let units = |m: f32| (m * step as f32 * 0.125 + 0.5) as u32;
-                                let to = units(anchor_dist(a, r, tile_centre(map, nt)));
-                                // Never into the bucket being drained.
-                                (base + to.saturating_sub(units(from))).max(cur + 1)
-                            })
-                        }
-                        _ => None,
-                    };
-                    // The neighbour's components this one touches; open
-                    // tiles have one component and always connect.
-                    let links = if diagonal || (here_open && nt_open) {
-                        1
-                    } else {
-                        link_mask(map, t, c, dx, dy)
-                    };
-                    for nc in 0..MAX_COMP as u8 {
-                        if links & (1 << nc) == 0 {
-                            continue;
-                        }
-                        let j = np * PAGE_COST + nl * 4 + nc as usize;
-                        let node = (nt << 2) | nc as u32;
-                        let (new, a) = match straight {
-                            Some(s) if s <= grid + STRAIGHT_SLACK => (s, anchor),
-                            _ if step_anchor == NONE => (grid, node),
-                            _ => (grid, step_anchor),
-                        };
-                        // Within rounding, a straight line beats a turn,
-                        // even one already queued (but not yet expanded).
-                        let old = page_cost[j];
-                        let straighter = a == anchor
-                            && page_anchor[j] != anchor
-                            && old > cur
-                            && old != INF
-                            && new <= old + STRAIGHT_SLACK;
-                        if new < old || straighter {
-                            page_cost[j] = new;
-                            page_anchor[j] = a;
-                            if new != old {
-                                dial[new as usize & (DIAL_BUCKETS - 1)].push(node);
-                                pending += 1;
                             }
+                        };
+                        via.map(|(base, from)| {
+                            // Metres × 20 units/m × step/160, each end
+                            // rounded on its own: along a uniform line the
+                            // roundings cancel instead of adding up.
+                            let units = |m: f32| (m * st as f32 * 0.125 + 0.5) as u32;
+                            let to = units(anchor_dist(a, r, tile_centre(map, nt)));
+                            // Never into the bucket being drained.
+                            (base + to.saturating_sub(units(from))).max(cur + 1)
+                        })
+                    }
+                    _ => None,
+                };
+                // The neighbour's components this one touches; open
+                // tiles have one component and always connect.
+                let links = if diagonal || (here_open && nt_open) {
+                    1
+                } else {
+                    link_mask(map, here_kind, nt_kind, c, dir)
+                };
+                // Set bits in ascending order, as a test of each of the
+                // MAX_COMP bits would visit them.
+                let mut rest = links & ((1 << MAX_COMP) - 1);
+                while rest != 0 {
+                    let nc = rest.trailing_zeros() as usize;
+                    rest &= rest - 1;
+                    let j = j0 + nc;
+                    let nnode = (nt << 2) | nc as u32;
+                    let (new, a) = match straight {
+                        Some(s) if s <= grid + STRAIGHT_SLACK => (s, anchor),
+                        _ if step_anchor == NONE => (grid, nnode),
+                        _ => (grid, step_anchor),
+                    };
+                    // Within rounding, a straight line beats a turn,
+                    // even one already queued (but not yet expanded).
+                    let [old, old_anchor] = node[j];
+                    let straighter = a == anchor
+                        && old_anchor != anchor
+                        && old > cur
+                        && old != INF
+                        && new <= old + STRAIGHT_SLACK;
+                    if new < old || straighter {
+                        node[j] = [new, a];
+                        if new != old {
+                            q.push(new, nnode);
+                            pending += 1;
                         }
                     }
                 }
             }
-            let mut items = items;
-            items.clear();
-            dial[b] = items;
-            cur += 1;
         }
-        // Mark tiles whose costs changed noticeably, and their neighbours.
-        for k in 0..goal.page_list.len() {
-            let p = goal.page_list[k] as usize;
-            let r = self.page_region[p];
-            let (rx, ry) = (r % map.rdim, r / map.rdim);
-            for local in 0..PAGE_TILES {
-                let base = p * PAGE_COST + local * 4;
-                let changed = (0..4).any(|c| {
-                    let (old, new) = (self.page_prev[base + c], self.page_cost[base + c]);
-                    if old == INF || new == INF {
-                        return old != new;
-                    }
-                    old.abs_diff(new) > old.max(new) / 25 + 40
-                });
-                if !changed {
+        q.put(b, items);
+        cur += 1;
+    }
+    // Mark tiles whose costs changed noticeably, and their neighbours.
+    for (k, &p) in goal.page_list.iter().enumerate() {
+        let p = p as usize;
+        let r = page_region[p];
+        let (rx, ry) = (r % rdim, r / rdim);
+        for local in 0..PAGE_TILES {
+            let old = &page_cost[p * PAGE_COST + local * 4..][..4];
+            let new = &node[(k * PAGE_TILES + local) * 4..][..4];
+            let changed = old.iter().zip(new).any(|(&old, &[new, _])| {
+                if old == INF || new == INF {
+                    return old != new;
+                }
+                old.abs_diff(new) > old.max(new) / 25 + 40
+            });
+            if !changed {
+                continue;
+            }
+            let (tx, ty) = (
+                rx * REGION + local as u32 % REGION,
+                ry * REGION + local as u32 / REGION,
+            );
+            // Flow tiles are seeded from all eight neighbours.
+            for (dx, dy) in [
+                (0i32, 0i32),
+                (1, 0),
+                (-1, 0),
+                (0, 1),
+                (0, -1),
+                (1, 1),
+                (-1, 1),
+                (1, -1),
+                (-1, -1),
+            ] {
+                let (nx, ny) = (tx as i32 + dx, ty as i32 + dy);
+                if !in_map(nx, ny) {
                     continue;
                 }
-                let (tx, ty) = (
-                    rx * REGION + local as u32 % REGION,
-                    ry * REGION + local as u32 / REGION,
-                );
-                // Flow tiles are seeded from all eight neighbours.
-                for (dx, dy) in [
-                    (0i32, 0i32),
-                    (1, 0),
-                    (-1, 0),
-                    (0, 1),
-                    (0, -1),
-                    (1, 1),
-                    (-1, 1),
-                    (1, -1),
-                    (-1, -1),
-                ] {
-                    let (nx, ny) = (tx as i32 + dx, ty as i32 + dy);
-                    if nx < 0 || ny < 0 || nx >= tdim as i32 || ny >= tdim as i32 {
-                        continue;
-                    }
-                    if let Some((np, nl)) = page_of(map.tile_index(nx as u32, ny as u32)) {
-                        self.page_epoch[np * PAGE_TILES + nl] = epoch;
-                    }
+                if let Some(nd) = at(nx as u32, ny as u32) {
+                    mark[nd] = true;
                 }
             }
         }
@@ -1219,17 +1388,26 @@ fn tile_block(fields: &Fields, cx: f32, cy: f32) -> f32 {
     m
 }
 
-/// The components of the orthogonal neighbour at `dx, dy` of tile `t` that
-/// component `c` of `t` connects to: bit `b` for component `b`.
-#[inline]
-fn link_mask(map: &Map, t: u32, c: u8, dx: i32, dy: i32) -> u16 {
-    let dir = match (dx, dy) {
-        (1, _) => 0,
-        (-1, _) => 1,
-        (_, 1) => 2,
-        _ => 3,
+/// The components of a tile's neighbour across border `dir` (+x, -x, +y,
+/// -y, the order of `TILE_STEPS`) that component `c` connects to, bit `b`
+/// for component `b`: `(Map::tile_links(t, dir) >> (c * 4)) & 0xf`, from
+/// the two tiles' `Map::tiles` entries, which the caller already has.
+#[inline(always)]
+fn link_mask(map: &Map, here: u32, there: u32, c: u8, dir: usize) -> u16 {
+    let links = match (here, there) {
+        (BLOCKED, _) | (_, BLOCKED) => 0,
+        (OPEN, OPEN) => 1,
+        (OPEN, m) => {
+            // Row `c` of the transposed links: bits c, c + 4, c + 8, c + 12.
+            let m = map.mixed[m as usize].links[dir ^ 1];
+            return ((m >> c) & 1)
+                | ((m >> (c + 3)) & 2)
+                | ((m >> (c + 6)) & 4)
+                | ((m >> (c + 9)) & 8);
+        }
+        (m, _) => map.mixed[m as usize].links[dir],
     };
-    (map.tile_links(t, dir) >> (c * 4)) & 0xf
+    (links >> (c * 4)) & 0xf
 }
 
 /// Output and scratch of one flow tile build, reused every tick.
@@ -2216,5 +2394,29 @@ mod tests {
         let (end, a) = walk(&mut fs, &map, &fields, 3, Vec2::new(40.0, 40.0), 8000);
         assert!(a, "{end:?}");
         assert!((end - Vec2::new(-50.0, -50.0)).len() < 6.0);
+    }
+
+    #[test]
+    fn dial_skip_finds_the_next_bucket_round_the_ring() {
+        let mut q = Dial {
+            buckets: (0..DIAL_BUCKETS).map(|_| Vec::new()).collect(),
+            full: [0; DIAL_BUCKETS / 64],
+        };
+        assert_eq!(q.skip(17), None);
+        for &(b, from) in &[
+            (5usize, 3usize),
+            (64, 5),
+            (4095, 100),
+            (2, 4095),
+            (700, 700),
+        ] {
+            q.push(b as u32 + DIAL_BUCKETS as u32 * 3, 1);
+            let want = (b + DIAL_BUCKETS - from) % DIAL_BUCKETS;
+            assert_eq!(q.skip(from), Some(want as u32), "bucket {b} from {from}");
+            let items = q.take(b);
+            assert_eq!(items, [1]);
+            q.put(b, items);
+            assert_eq!(q.skip(from), None);
+        }
     }
 }
