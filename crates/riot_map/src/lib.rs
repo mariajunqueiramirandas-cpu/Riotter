@@ -229,6 +229,8 @@ impl Map {
             });
         }
 
+        let boxes: Vec<[f32; 4]> = segs.iter().map(clear_box).collect();
+
         // --- (tile, segment) pairs for every tile within `margin` of a segment
         let tile_of =
             |v: f32| (((v + half) / TILE_M).floor() as i64).clamp(0, tdim as i64 - 1) as u32;
@@ -289,6 +291,7 @@ impl Map {
                 }
                 let mut ptr = [0usize; TILE as usize];
                 let mut wind = [0i32; TILE as usize];
+                let mut seg_cols: Vec<u16> = Vec::new();
                 let mut out = RowOut {
                     kinds: Vec::with_capacity(tdim as usize),
                     mixed: Vec::new(),
@@ -303,38 +306,88 @@ impl Map {
                     let tile_segs = &row_pairs[p0..pi];
                     let x0 = tx as f32 * TILE_M - half;
                     let y0 = ty as f32 * TILE_M - half;
-                    let mut bits = [0u64; 4];
-                    let mut any_open = false;
-                    for ly in 0..TILE as usize {
-                        let y = y0 + (ly as f32 + 0.5) * NAV_CELL;
-                        for lx in 0..TILE as usize {
-                            let x = x0 + (lx as f32 + 0.5) * NAV_CELL;
-                            let c = &cross[ly];
-                            while ptr[ly] < c.len() && c[ptr[ly]].0 < x {
-                                wind[ly] += c[ptr[ly]].1;
-                                ptr[ly] += 1;
-                            }
-                            let mut open = wind[ly] == 0 && x > -hw && x < hw && y > -hh && y < hh;
-                            if open {
-                                let p = Vec2::new(x, y);
-                                for &(_, s) in tile_segs {
-                                    let seg = &segs[s as usize];
-                                    if (riot_core::math::closest_on_segment(p, seg.a, seg.b) - p)
-                                        .len2()
-                                        < CLEARANCE * CLEARANCE
-                                    {
-                                        open = false;
-                                        break;
-                                    }
-                                }
-                            }
-                            if open {
-                                let bit = ly * 16 + lx;
-                                bits[bit >> 6] |= 1 << (bit & 63);
-                                any_open = true;
-                            }
+                    // Cell centres of the tile's columns, and the columns
+                    // inside the map. The centres never decrease with `lx`.
+                    let mut xs = [0.0f32; TILE as usize];
+                    let mut cols_in = 0u16;
+                    for (lx, x) in xs.iter_mut().enumerate() {
+                        *x = x0 + (lx as f32 + 0.5) * NAV_CELL;
+                        if *x > -hw && *x < hw {
+                            cols_in |= 1 << lx;
                         }
                     }
+                    // The columns whose centre is inside each segment's
+                    // clearance box. A cell outside the box is farther than
+                    // CLEARANCE from the segment, so its clearance test
+                    // below would fail anyway (see `clear_box`).
+                    seg_cols.clear();
+                    seg_cols.extend(tile_segs.iter().map(|&(_, s)| {
+                        let b = &boxes[s as usize];
+                        let mut cols = 0u16;
+                        for (lx, &x) in xs.iter().enumerate() {
+                            if !(x < b[0] || x > b[1]) {
+                                cols |= 1 << lx;
+                            }
+                        }
+                        cols
+                    }));
+                    let mut bits = [0u64; 4];
+                    for ly in 0..TILE as usize {
+                        let y = y0 + (ly as f32 + 0.5) * NAV_CELL;
+                        // Winding of each cell: the crossings left of its centre.
+                        let c = &cross[ly];
+                        let (mut p, mut w) = (ptr[ly], wind[ly]);
+                        while p < c.len() && c[p].0 < xs[0] {
+                            w += c[p].1;
+                            p += 1;
+                        }
+                        let mut row = if p == c.len() || c[p].0 >= xs[TILE as usize - 1] {
+                            // No crossing up to the last centre: one winding.
+                            if w == 0 { u16::MAX } else { 0 }
+                        } else {
+                            let mut row = 0u16;
+                            for (lx, &x) in xs.iter().enumerate() {
+                                while p < c.len() && c[p].0 < x {
+                                    w += c[p].1;
+                                    p += 1;
+                                }
+                                if w == 0 {
+                                    row |= 1 << lx;
+                                }
+                            }
+                            row
+                        };
+                        (ptr[ly], wind[ly]) = (p, w);
+                        if !(y > -hh && y < hh) {
+                            row = 0;
+                        }
+                        row &= cols_in;
+                        // Clearance: no wall closer than CLEARANCE. Only the
+                        // cells inside a segment's box need the exact test.
+                        for (&(_, s), &cols) in tile_segs.iter().zip(&seg_cols) {
+                            if row == 0 {
+                                break;
+                            }
+                            let b = &boxes[s as usize];
+                            if y < b[2] || y > b[3] {
+                                continue;
+                            }
+                            let mut cand = row & cols;
+                            let seg = &segs[s as usize];
+                            while cand != 0 {
+                                let lx = cand.trailing_zeros() as usize;
+                                cand &= cand - 1;
+                                let p = Vec2::new(xs[lx], y);
+                                if (riot_core::math::closest_on_segment(p, seg.a, seg.b) - p).len2()
+                                    < CLEARANCE * CLEARANCE
+                                {
+                                    row &= !(1 << lx);
+                                }
+                            }
+                        }
+                        bits[ly >> 2] |= (row as u64) << ((ly & 3) * 16);
+                    }
+                    let any_open = bits != [0; 4];
                     if !any_open {
                         out.kinds.push(BLOCKED);
                         continue;
@@ -976,6 +1029,22 @@ pub fn transpose_links(m: u16) -> u16 {
         }
     }
     out
+}
+
+/// The box `[x0, x1, y0, y1]` around a segment, CLEARANCE wider on each side
+/// plus slack: a point outside it is more than CLEARANCE from the segment,
+/// so the exact clearance test (`closest_on_segment`, distance squared
+/// `< CLEARANCE²`) fails for it. The slack (0.05 m) covers the rounding of
+/// that test, whose closest point can leave the segment's own box only by a
+/// few ulps of the coordinates (≤ 2 mm on an 8 km map), and of this box.
+fn clear_box(s: &Seg) -> [f32; 4] {
+    const R: f32 = CLEARANCE + 0.05;
+    [
+        s.a.x.min(s.b.x) - R,
+        s.a.x.max(s.b.x) + R,
+        s.a.y.min(s.b.y) - R,
+        s.a.y.max(s.b.y) + R,
+    ]
 }
 
 /// Squared distance between a segment and an axis-aligned box.
