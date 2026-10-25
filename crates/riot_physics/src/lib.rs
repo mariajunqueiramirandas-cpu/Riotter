@@ -230,12 +230,14 @@ pub fn move_bodies(p: &mut People, s: &mut PhysScratch, events: &mut [Vec<Event>
         .enumerate()
         .map(|(c, ((((px, py), (vx, vy)), (pose, stat)), aux))| {
             let base = c * CHUNK_AGENTS;
+            let n = px.len();
+            // This chunk's part of every array, indexed by `k`.
+            let (py, vx, vy) = (&mut py[..n], &mut vx[..n], &mut vy[..n]);
+            let (pose, stat, aux) = (&mut pose[..n], &mut stat[..n], &mut aux[..n]);
+            let (x0, y0) = (&x0[base..][..n], &y0[base..][..n]);
+            let (press, emo) = (&press[base..][..n], &emo[base..][..n]);
             let mut peak = 0.0f32;
-            for k in 0..px.len() {
-                let i = base + k;
-                if i >= len {
-                    continue;
-                }
+            for k in 0..len.saturating_sub(base).min(n) {
                 let fl = stat[k][stat::FLAGS];
                 if fl & flag::DEAD != 0 {
                     continue;
@@ -247,7 +249,7 @@ pub fn move_bodies(p: &mut People, s: &mut PhysScratch, events: &mut [Vec<Event>
                 }
                 let a = &cx.arch[stat[k][stat::ARCH] as usize];
                 let r = a.radius;
-                let start = Vec2::new(x0[i], y0[i]);
+                let start = Vec2::new(x0[k], y0[k]);
                 let mut q = Vec2::new(px[k], py[k]);
                 let mut wall_push = 0.0f32;
                 // The walls near the predicted position, kept for the tunnel
@@ -305,15 +307,18 @@ pub fn move_bodies(p: &mut People, s: &mut PhysScratch, events: &mut [Vec<Event>
                 // both ends are in it.
                 let mut crossed = false;
                 if q != start {
-                    let (l0, l1) = (
-                        cx.map.walls_near(start),
-                        if q == q0 { near0 } else { cx.map.walls_near(q) },
-                    );
+                    let l0 = cx.map.walls_near(start);
+                    let l1 = if q == q0 { near0 } else { cx.map.walls_near(q) };
                     let l1 = if core::ptr::eq(l0, l1) { &[][..] } else { l1 };
-                    crossed = l0.iter().chain(l1).any(|&sg| {
-                        let (sa, sb) = cx.map.segment(sg);
-                        segment_hit(start, q, sa, sb).is_some()
-                    });
+                    'tunnel: for list in [l0, l1] {
+                        for &sg in list {
+                            let (sa, sb) = cx.map.segment(sg);
+                            if segment_hit(start, q, sa, sb).is_some() {
+                                crossed = true;
+                                break 'tunnel;
+                            }
+                        }
+                    }
                 }
                 if crossed {
                     q = start;
@@ -325,7 +330,7 @@ pub fn move_bodies(p: &mut People, s: &mut PhysScratch, events: &mut [Vec<Event>
                 vx[k] = v.x;
                 vy[k] = v.y;
                 let pr =
-                    (((press[i] * inv_iters - baseline).max(0.0) + wall_push) * pscale).min(1.0);
+                    (((press[k] * inv_iters - baseline).max(0.0) + wall_push) * pscale).min(1.0);
                 peak = peak.max(pr);
                 // What hurts is sustained compression, not a collision.
                 let held = widen_u8(pose[k][pose::PRESSURE]);
@@ -356,8 +361,8 @@ pub fn move_bodies(p: &mut People, s: &mut PhysScratch, events: &mut [Vec<Event>
 
                 // Stillness counter and falling asleep (DESIGN §7.6).
                 // Only sleep untouched: two overlapping sleepers would never separate.
-                let calm = widen_u8(emo[i][emo::FEAR]) < 0.45
-                    && press[i] * inv_iters < 0.004
+                let calm = widen_u8(emo[k][emo::FEAR]) < 0.45
+                    && press[k] * inv_iters < 0.004
                     && fl & flag::URGENT == 0;
                 let restful = matches!(
                     act,
