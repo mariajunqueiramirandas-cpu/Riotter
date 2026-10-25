@@ -73,9 +73,25 @@ pub fn steer(
         stable_id,
         ..
     } = p;
-    let px = lanes::flat(pos_x);
-    let py = lanes::flat(pos_y);
-    let (stat, emo, intent, aux, stable_id) = (&*stat, &*emo, &*intent, &*aux, &*stable_id);
+    // Everything indexed by a neighbour has one length, and everything
+    // indexed only by the agent is cut to `len`, so one bounds check
+    // covers each group.
+    let (px, py, radius) = (lanes::flat(pos_x), lanes::flat(pos_y), &cx.sp.radius[..]);
+    let m = px
+        .len()
+        .min(py.len())
+        .min(old_vx.len())
+        .min(old_vy.len())
+        .min(radius.len());
+    let (px, py, old_vx, old_vy, radius) =
+        (&px[..m], &py[..m], &old_vx[..m], &old_vy[..m], &radius[..m]);
+    let (stat, emo, intent, aux, stable_id) = (
+        &stat[..len],
+        &emo[..len],
+        &intent[..len],
+        &aux[..len],
+        &stable_id[..len],
+    );
     let vx = &mut lanes::flat_mut(vel_x)[..chunks * CHUNK_AGENTS];
     let vy = &mut lanes::flat_mut(vel_y)[..chunks * CHUNK_AGENTS];
     let pose = &mut pose[..chunks * CHUNK_AGENTS];
@@ -336,7 +352,7 @@ pub fn steer(
                     let w = Vec2::new(old_vx[j], old_vy[j]);
                     let d = q - pos;
                     let rv = desired - w;
-                    let rr = ri + cx.sp.radius[j];
+                    let rr = ri + radius[j];
                     if d.len2() < (rr + 0.05) * (rr + 0.05) {
                         touching += 1;
                     }
