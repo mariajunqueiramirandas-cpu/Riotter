@@ -117,6 +117,19 @@ one above it.
   the time of day, and at night pools of light from street lamps, fires,
   molotovs and police light bars.
 
+## Pathfinding
+
+People route on flow fields built in tiles along a corridor of 128 m regions
+(DESIGN §9), so a route across an 8 km city never searches the whole map.
+Routes are **any-angle**: the tile search is Theta\*-style, each tile heading
+straight for an anchor it can see (the goal, or the open tile where the route
+next turns), and each 8 m flow tile is solved with the Fast Marching Method,
+so people walk straight across squares and round corners closely instead of
+following a grid's staircase. Crowding, gas and fire raise the cost of the
+ground they cover, so routes bend around crushes and clouds. While a flow
+tile is still being built, people head for their tile's anchor instead of
+walking at a wall.
+
 ## Tests and checks
 
 ```sh

@@ -22,11 +22,11 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
 use riot_core::Vec2;
-use riot_core::math::HEADING_DIRS;
+use riot_core::math::{HEADING_DIRS, heading_of};
 use riot_team::prelude::*;
 
 use crate::fields::{Fields, Layer};
-use crate::map::{BLOCKED, Map, REGION, TILE, TILE_M};
+use crate::map::{BLOCKED, COST_PER_M, MAX_COMP, Map, OPEN, REGION, TILE, TILE_M};
 use crate::tunables::Tunables;
 
 pub const MAX_GOALS: usize = 32;
@@ -47,14 +47,34 @@ const PAGE_COST: usize = (REGION * REGION) as usize * 4;
 const PAGE_TILES: usize = (REGION * REGION) as usize;
 /// Cost of crossing one open tile (8 m at 20 units per metre).
 const TILE_STEP: u32 = 160;
-/// Buckets in Dial's queue: more than the largest tile step cost.
+/// Buckets in Dial's queue: a power of two, more than the largest tile step
+/// cost (a diagonal step at the largest penalty, 905).
 const DIAL_BUCKETS: usize = 1024;
+const _: () = assert!(DIAL_BUCKETS.is_power_of_two());
 /// Largest tile step cost (`TILE_STEP` plus the largest penalty).
 const MAX_STEP: u32 = TILE_STEP * 4;
 /// Most flow tiles built per tick; further requests wait a tick.
 const MAX_JOBS_PER_TICK: usize = 96;
 /// Most corridor recomputes per tick.
 const MAX_RECOMPUTES_PER_TICK: usize = 2;
+/// A node's anchor is goal target `k` when this bit is set (`ANCHOR_TARGET | k`).
+const ANCHOR_TARGET: u32 = 1 << 31;
+/// √2 in 1/256ths, for diagonal tile steps.
+const DIAG_256: u32 = 362;
+/// Neighbours in the tile search: orthogonal first, then diagonal.
+const TILE_STEPS: [(i32, i32); 8] = [
+    (1, 0),
+    (-1, 0),
+    (0, 1),
+    (0, -1),
+    (1, 1),
+    (-1, 1),
+    (1, -1),
+    (-1, -1),
+];
+/// Route cost units (0.1 m) by which a straight line may exceed a turn and
+/// still win: rounding, not geometry, decides closer calls.
+const STRAIGHT_SLACK: u32 = 2;
 
 #[derive(Clone, Debug)]
 pub struct Goal {
@@ -118,6 +138,10 @@ pub fn record(goal: u8, tile: u32, request: bool) -> u64 {
 pub struct FlowSystem {
     pub goals: Vec<Goal>,
     pub page_cost: Vec<u32>,
+    /// Anchor of each tile component (Theta*'s parent): the point its route
+    /// heads straight for. A node key `(tile << 2) | comp`, `ANCHOR_TARGET |
+    /// k` for goal target `k`, or `NONE`.
+    pub page_anchor: Vec<u32>,
     /// Costs before the latest recompute, to detect what changed.
     page_prev: Vec<u32>,
     /// Cost of entering each tile, refreshed with the costs.
@@ -189,6 +213,7 @@ impl FlowSystem {
             // One at a time: cloning a Vec does not keep its capacity.
             goals: (0..MAX_GOALS).map(|_| make_goal()).collect(),
             page_cost: vec![INF; pages * PAGE_COST],
+            page_anchor: vec![NONE; pages * PAGE_COST],
             page_prev: vec![INF; pages * PAGE_COST],
             page_step: vec![TILE_STEP; pages * PAGE_TILES],
             page_epoch: vec![0; pages * PAGE_TILES],
@@ -294,6 +319,42 @@ impl FlowSystem {
         let (tx, ty) = (t & (map.tdim - 1), t >> map.tshift);
         let local = ((ty % REGION) * REGION + tx % REGION) as usize;
         self.page_cost[page as usize * PAGE_COST + local * 4 + comp as usize]
+    }
+
+    /// Anchor of a tile component (see [`FlowSystem::page_anchor`]), `NONE`
+    /// when it has none.
+    #[inline]
+    pub fn tile_anchor(&self, map: &Map, g: u8, t: u32, comp: u8) -> u32 {
+        let goal = &self.goals[g as usize];
+        let page = goal.pages[map.region_of_tile(t) as usize];
+        if page == NONE {
+            return NONE;
+        }
+        let (tx, ty) = (t & (map.tdim - 1), t >> map.tshift);
+        let local = ((ty % REGION) * REGION + tx % REGION) as usize;
+        self.page_anchor[page as usize * PAGE_COST + local * 4 + comp as usize]
+    }
+
+    /// Cost of entering tile `t` (`TILE_STEP` plus penalties), as of the
+    /// goal's last recompute; `TILE_STEP` outside its corridor.
+    #[inline]
+    fn tile_step(&self, map: &Map, g: u8, t: u32) -> u32 {
+        let goal = &self.goals[g as usize];
+        let page = goal.pages[map.region_of_tile(t) as usize];
+        if page == NONE {
+            return TILE_STEP;
+        }
+        let (tx, ty) = (t & (map.tdim - 1), t >> map.tshift);
+        let local = ((ty % REGION) * REGION + tx % REGION) as usize;
+        self.page_step[page as usize * PAGE_TILES + local]
+    }
+
+    /// Where an anchor is and the radius of the goal disc around it, if
+    /// routes can head straight for it: a goal target, or the centre of a
+    /// fully open tile.
+    #[inline]
+    pub fn anchor_point(&self, map: &Map, g: u8, a: u32) -> Option<(Vec2, f32)> {
+        anchor_at(map, &self.goals[g as usize], a)
     }
 
     /// Phase 10: swap in finished tiles, take requests, recompute corridors,
@@ -575,13 +636,15 @@ impl FlowSystem {
             self.page_prev[p as usize * PAGE_COST..(p as usize + 1) * PAGE_COST].fill(INF);
             self.page_epoch[p as usize * PAGE_TILES..(p as usize + 1) * PAGE_TILES].fill(0);
             self.page_cost[p as usize * PAGE_COST..(p as usize + 1) * PAGE_COST].fill(INF);
+            self.page_anchor[p as usize * PAGE_COST..(p as usize + 1) * PAGE_COST].fill(NONE);
             self.page_flow[p as usize * PAGE_TILES..(p as usize + 1) * PAGE_TILES].fill(NONE);
         }
     }
 
-    /// Tile components touching the goal's target discs.
-    fn for_each_source(map: &Map, goal: &Goal, mut f: impl FnMut(u32, u8)) {
-        for &t in &goal.targets {
+    /// Tile components touching the goal's target discs, with the index of
+    /// the target.
+    fn for_each_source(map: &Map, goal: &Goal, mut f: impl FnMut(u32, u8, u32)) {
+        for (k, &t) in goal.targets.iter().enumerate() {
             let r = goal.radius;
             let (x0, y0) = map.nav.to_cell_f(t.x - r, t.y - r);
             let (x1, y1) = map.nav.to_cell_f(t.x + r, t.y + r);
@@ -608,7 +671,7 @@ impl FlowSystem {
                                 && !seen[c as usize]
                             {
                                 seen[c as usize] = true;
-                                f(tile, c);
+                                f(tile, c, k as u32);
                             }
                         }
                     }
@@ -628,7 +691,7 @@ impl FlowSystem {
             let goal = &self.goals[gi];
             let mut sources = [0u32; 256];
             let mut ns = 0;
-            Self::for_each_source(map, goal, |t, c| {
+            Self::for_each_source(map, goal, |t, c, _| {
                 if let Some(n) = map.rnode_of(t, c)
                     && ns < sources.len()
                     && !sources[..ns].contains(&n)
@@ -667,10 +730,23 @@ impl FlowSystem {
         goal.region_ready = true;
     }
 
-    /// Dijkstra over tile components restricted to the corridor, with
-    /// Dial's bucket queue over integer costs (DESIGN §9). Tiles whose costs
-    /// changed noticeably, and their neighbours, get the new epoch so their
-    /// flow tiles are rebuilt; everything else keeps its flow.
+    /// Any-angle Dijkstra over tile components restricted to the corridor,
+    /// with Dial's bucket queue over integer costs (DESIGN §9).
+    ///
+    /// Costs are Theta*-style (Nash, Daniel, Koenig and Felner, "Theta*:
+    /// Any-Angle Path Planning on Grids", 2007): every node keeps an anchor,
+    /// the last point its route turns at, and a node that sees its
+    /// neighbour's anchor across open tiles takes the straight-line cost to
+    /// it instead of a grid step. Line of sight is propagated, not traced: a
+    /// node sees anchor `A` when the tile its centre-to-`A` line enters
+    /// first is fully open and already sees `A`, so the test costs one
+    /// lookup. The straight segment is charged each tile's own penalty, so
+    /// crowds and gas still bend routes. Steps are 8-connected where the
+    /// four tiles involved are open.
+    ///
+    /// Tiles whose costs changed noticeably, and their neighbours, get the
+    /// new epoch so their flow tiles are rebuilt; everything else keeps its
+    /// flow.
     fn tile_dijkstra(&mut self, map: &Map, fields: &Fields, tun: &Tunables, g: u8) {
         let gi = g as usize;
         let epoch = self.goals[gi].version;
@@ -678,6 +754,7 @@ impl FlowSystem {
             let (a, b) = (p as usize * PAGE_COST, (p as usize + 1) * PAGE_COST);
             self.page_prev[a..b].copy_from_slice(&self.page_cost[a..b]);
             self.page_cost[a..b].fill(INF);
+            self.page_anchor[a..b].fill(NONE);
             let r = self.page_region[p as usize];
             let (rx, ry) = (r % map.rdim, r / map.rdim);
             for local in 0..PAGE_TILES as u32 {
@@ -688,6 +765,7 @@ impl FlowSystem {
         }
         let goal = &self.goals[gi];
         let page_cost = &mut self.page_cost;
+        let page_anchor = &mut self.page_anchor;
         let page_step = &self.page_step;
         let dial = &mut self.dial;
         for b in dial.iter_mut() {
@@ -706,20 +784,32 @@ impl FlowSystem {
         };
         let idx = |t: u32, c: u8| page_of(t).map(|(p, l)| p * PAGE_COST + l * 4 + c as usize);
         let mut pending = 0usize;
-        Self::for_each_source(map, goal, |t, c| {
+        Self::for_each_source(map, goal, |t, c, k| {
             if let Some(i) = idx(t, c)
                 && page_cost[i] != 0
             {
                 page_cost[i] = 0;
+                page_anchor[i] = ANCHOR_TARGET | k;
                 dial[0].push((t << 2) | c as u32);
                 pending += 1;
             }
         });
         let tdim = map.tdim;
-        let nb = dial.len();
+        let in_map = |x: i32, y: i32| x >= 0 && y >= 0 && x < tdim as i32 && y < tdim as i32;
+        // A fully open tile in the corridor: lines of sight may cross it.
+        let clear = |x: i32, y: i32| {
+            in_map(x, y) && {
+                let t = map.tile_index(x as u32, y as u32);
+                map.tiles[t as usize] == OPEN && page_of(t).is_some()
+            }
+        };
         let mut cur = 0u32;
         while pending > 0 {
-            let b = cur as usize % nb;
+            let b = cur as usize & (DIAL_BUCKETS - 1);
+            if dial[b].is_empty() {
+                cur += 1;
+                continue;
+            }
             let items = std::mem::take(&mut dial[b]);
             for &key in &items {
                 pending -= 1;
@@ -729,29 +819,139 @@ impl FlowSystem {
                     continue;
                 }
                 let (tx, ty) = (t & (tdim - 1), t >> map.tshift);
-                for (dx, dy) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+                let here_open = map.tiles[t as usize] == OPEN;
+                let anchor = page_anchor[i];
+                let sight = anchor_at(map, goal, anchor);
+                // A grid step's anchor: this tile's centre when routes can
+                // head for it, otherwise the neighbour itself.
+                let step_anchor = if here_open { key } else { NONE };
+                // Diagonal steps matter where routes turn, near their
+                // anchor; along a straight run the neighbours' own lines of
+                // sight already give the diagonal tiles their cost.
+                let turning = here_open
+                    && sight.is_none_or(|(a, _)| {
+                        (a - tile_centre(map, t)).len2() < (1.5 * TILE_M) * (1.5 * TILE_M)
+                    });
+                let steps = if turning {
+                    &TILE_STEPS[..]
+                } else {
+                    &TILE_STEPS[..4]
+                };
+                for &(dx, dy) in steps {
                     let (nx, ny) = (tx as i32 + dx, ty as i32 + dy);
-                    if nx < 0 || ny < 0 || nx >= tdim as i32 || ny >= tdim as i32 {
+                    if !in_map(nx, ny) {
                         continue;
                     }
+                    let diagonal = dx != 0 && dy != 0;
                     let nt = map.tile_index(nx as u32, ny as u32);
                     let Some((np, nl)) = page_of(nt) else {
                         continue;
                     };
+                    let nt_open = map.tiles[nt as usize] == OPEN;
+                    // An open tile has one component; once it is expanded
+                    // nothing here can improve it.
+                    let j0 = np * PAGE_COST + nl * 4;
+                    if nt_open && page_cost[j0] <= cur {
+                        continue;
+                    }
+                    if diagonal
+                        && !(nt_open
+                            && clear(tx as i32 + dx, ty as i32)
+                            && clear(tx as i32, ty as i32 + dy))
+                    {
+                        continue;
+                    }
                     let step = page_step[np * PAGE_TILES + nl].min(MAX_STEP);
-                    let mut done = [false; 4];
-                    for_each_link(map, t, c, nt, dx, dy, |nc| {
-                        if std::mem::replace(&mut done[nc as usize], true) {
-                            return;
+                    let grid = cur
+                        + if diagonal {
+                            step * DIAG_256 / 256
+                        } else {
+                            step
+                        };
+                    // Straight on from this node's anchor, when the
+                    // neighbour sees it. A neighbour already heading for
+                    // the same anchor has exactly that cost.
+                    let straight = match sight {
+                        Some((a, r)) if nt_open && page_anchor[j0] != anchor => {
+                            let target = anchor & ANCHOR_TARGET != 0;
+                            // The cost and distance to the anchor of the
+                            // tile the line enters first.
+                            let via = match toward(map, nx as u32, ny as u32, a) {
+                                None => target.then_some((0, 0.0)),
+                                Some((ex, ey)) => {
+                                    let (px, py) = (nx + ex, ny + ey);
+                                    let corner_ok = ex == 0
+                                        || ey == 0
+                                        || (clear(nx + ex, ny) && clear(nx, ny + ey));
+                                    if corner_ok && clear(px, py) {
+                                        let pt = map.tile_index(px as u32, py as u32);
+                                        idx(pt, 0)
+                                            .filter(|&q| {
+                                                (page_anchor[q] == anchor || pt << 2 == anchor)
+                                                    && page_cost[q] <= cur
+                                            })
+                                            .map(|q| {
+                                                // A goal tile costs 0 however
+                                                // far its centre is from the disc.
+                                                let d = if target && page_cost[q] == 0 {
+                                                    0.0
+                                                } else {
+                                                    anchor_dist(a, r, tile_centre(map, pt))
+                                                };
+                                                (page_cost[q], d)
+                                            })
+                                    } else {
+                                        None
+                                    }
+                                }
+                            };
+                            via.map(|(base, from)| {
+                                // Metres × 20 units/m × step/160, each end
+                                // rounded on its own: along a uniform line the
+                                // roundings cancel instead of adding up.
+                                let units = |m: f32| (m * step as f32 * 0.125 + 0.5) as u32;
+                                let to = units(anchor_dist(a, r, tile_centre(map, nt)));
+                                // Never into the bucket being drained.
+                                (base + to.saturating_sub(units(from))).max(cur + 1)
+                            })
+                        }
+                        _ => None,
+                    };
+                    // The neighbour's components this one touches; open
+                    // tiles have one component and always connect.
+                    let links = if diagonal || (here_open && nt_open) {
+                        1
+                    } else {
+                        link_mask(map, t, c, dx, dy)
+                    };
+                    for nc in 0..MAX_COMP as u8 {
+                        if links & (1 << nc) == 0 {
+                            continue;
                         }
                         let j = np * PAGE_COST + nl * 4 + nc as usize;
-                        let new = cur + step;
-                        if new < page_cost[j] {
+                        let node = (nt << 2) | nc as u32;
+                        let (new, a) = match straight {
+                            Some(s) if s <= grid + STRAIGHT_SLACK => (s, anchor),
+                            _ if step_anchor == NONE => (grid, node),
+                            _ => (grid, step_anchor),
+                        };
+                        // Within rounding, a straight line beats a turn,
+                        // even one already queued (but not yet expanded).
+                        let old = page_cost[j];
+                        let straighter = a == anchor
+                            && page_anchor[j] != anchor
+                            && old > cur
+                            && old != INF
+                            && new <= old + STRAIGHT_SLACK;
+                        if new < old || straighter {
                             page_cost[j] = new;
-                            dial[new as usize % nb].push((nt << 2) | nc as u32);
-                            pending += 1;
+                            page_anchor[j] = a;
+                            if new != old {
+                                dial[new as usize & (DIAL_BUCKETS - 1)].push(node);
+                                pending += 1;
+                            }
                         }
-                    });
+                    }
                 }
             }
             let mut items = items;
@@ -780,7 +980,18 @@ impl FlowSystem {
                     rx * REGION + local as u32 % REGION,
                     ry * REGION + local as u32 / REGION,
                 );
-                for (dx, dy) in [(0i32, 0i32), (1, 0), (-1, 0), (0, 1), (0, -1)] {
+                // Flow tiles are seeded from all eight neighbours.
+                for (dx, dy) in [
+                    (0i32, 0i32),
+                    (1, 0),
+                    (-1, 0),
+                    (0, 1),
+                    (0, -1),
+                    (1, 1),
+                    (-1, 1),
+                    (1, -1),
+                    (-1, -1),
+                ] {
                     let (nx, ny) = (tx as i32 + dx, ty as i32 + dy);
                     if nx < 0 || ny < 0 || nx >= tdim as i32 || ny >= tdim as i32 {
                         continue;
@@ -792,6 +1003,60 @@ impl FlowSystem {
             }
         }
     }
+}
+
+/// Centre of tile `t` in map coordinates.
+#[inline]
+pub fn tile_centre(map: &Map, t: u32) -> Vec2 {
+    let (tx, ty) = (t & (map.tdim - 1), t >> map.tshift);
+    Vec2::new(
+        tx as f32 * TILE_M - map.half + TILE_M * 0.5,
+        ty as f32 * TILE_M - map.half + TILE_M * 0.5,
+    )
+}
+
+/// Where anchor `a` of `goal` is and the radius of the goal disc around it,
+/// if routes can head straight for it: a goal target, or the centre of a
+/// fully open tile.
+#[inline]
+fn anchor_at(map: &Map, goal: &Goal, a: u32) -> Option<(Vec2, f32)> {
+    if a == NONE {
+        None
+    } else if a & ANCHOR_TARGET != 0 {
+        goal.targets
+            .get((a & !ANCHOR_TARGET) as usize)
+            .map(|&p| (p, goal.radius))
+    } else {
+        let t = a >> 2;
+        (map.tiles[t as usize] == OPEN).then(|| (tile_centre(map, t), 0.0))
+    }
+}
+
+/// Distance (m) from `p` to an anchor at `a` with goal radius `r`.
+#[inline]
+fn anchor_dist(a: Vec2, r: f32, p: Vec2) -> f32 {
+    ((a - p).len() - r).max(0.0)
+}
+
+/// The neighbour of tile `(tx, ty)` that the straight line from its centre
+/// to `a` crosses first, as an offset: `(±1, 0)`, `(0, ±1)`, or diagonal
+/// when the line leaves through a corner. `None` when `a` is in the tile.
+#[inline]
+fn toward(map: &Map, tx: u32, ty: u32, a: Vec2) -> Option<(i32, i32)> {
+    let d = (a - tile_centre(map, map.tile_index(tx, ty))) * (1.0 / TILE_M);
+    let (ax, ay) = (d.x.abs(), d.y.abs());
+    if ax <= 0.5 && ay <= 0.5 {
+        return None;
+    }
+    let sx = if d.x > 0.0 { 1 } else { -1 };
+    let sy = if d.y > 0.0 { 1 } else { -1 };
+    Some(if ax > ay * 1.001 {
+        (sx, 0)
+    } else if ay > ax * 1.001 {
+        (0, sy)
+    } else {
+        (sx, sy)
+    })
 }
 
 /// Cost of entering tile `t`: its length plus crowd, gas and fire penalties.
@@ -807,22 +1072,17 @@ fn tile_step_cost(map: &Map, fields: &Fields, tun: &Tunables, t: u32) -> u32 {
     TILE_STEP + (TILE_STEP as f32 * pen * 0.1) as u32
 }
 
-/// Call `f(neighbour_comp)` for every component of tile `nt` (offset
-/// `dx, dy` from `t`) that component `c` of `t` connects to.
+/// The components of the orthogonal neighbour at `dx, dy` of tile `t` that
+/// component `c` of `t` connects to: bit `b` for component `b`.
 #[inline]
-fn for_each_link(map: &Map, t: u32, c: u8, _nt: u32, dx: i32, dy: i32, mut f: impl FnMut(u8)) {
+fn link_mask(map: &Map, t: u32, c: u8, dx: i32, dy: i32) -> u16 {
     let dir = match (dx, dy) {
         (1, _) => 0,
         (-1, _) => 1,
         (_, 1) => 2,
         _ => 3,
     };
-    let row = (map.tile_links(t, dir) >> (c * 4)) & 0xf;
-    for b in 0..4u8 {
-        if row & (1 << b) != 0 {
-            f(b);
-        }
-    }
+    (map.tile_links(t, dir) >> (c * 4)) & 0xf
 }
 
 /// Output and scratch of one flow tile build, reused every tick.
@@ -833,14 +1093,14 @@ struct JobBuf {
 
 /// A small fixed-capacity binary min-heap, so tile builds never allocate.
 struct SmallHeap {
-    items: [(u32, u16); 2304],
+    items: [(u32, u16); 4096],
     len: usize,
 }
 
 impl SmallHeap {
     fn new() -> Self {
         SmallHeap {
-            items: [(0, 0); 2304],
+            items: [(0, 0); 4096],
             len: 0,
         }
     }
@@ -887,20 +1147,35 @@ impl SmallHeap {
     }
 }
 
-const NBR8: [(i32, i32, u32); 8] = [
-    (1, 0, 10),
-    (1, 1, 14),
-    (0, 1, 10),
-    (-1, 1, 14),
-    (-1, 0, 10),
-    (-1, -1, 14),
-    (0, -1, 10),
-    (1, -1, 14),
+/// Side of the grid a flow tile is solved on: its 16 × 16 cells inside a
+/// ring of the neighbouring tiles' cells.
+const RING: usize = TILE as usize + 2;
+const RING_CELLS: usize = RING * RING;
+/// A nav cell's eight neighbours, in heading order (heading `k × 32`).
+const NBR8: [(i32, i32); 8] = [
+    (1, 0),
+    (1, 1),
+    (0, 1),
+    (-1, 1),
+    (-1, 0),
+    (-1, -1),
+    (0, -1),
+    (1, -1),
 ];
 
-/// Build the direction field of tile `t` for goal `g` (DESIGN §9): a
-/// cell-level Dijkstra seeded from the goal's cells and from the border with
-/// downhill neighbour tiles. Pure function of its inputs.
+/// Build the direction field of tile `t` for goal `g` (DESIGN §9). Pure
+/// function of its inputs.
+///
+/// The arrival-time field is solved with the Fast Marching Method (Sethian,
+/// "A fast marching level set method for monotonically advancing fronts",
+/// 1996): the Eikonal equation `|∇T| = slowness`, slowness being the step
+/// cost of crowding, gas and fire. Its boundary is the goal's cells and a
+/// ring of cells from the downhill neighbour tiles, valued by the distance
+/// to the neighbour's anchor, so the field inside is the true straight-line
+/// distance to wherever the route next turns, not a grid distance. Each
+/// cell's direction is the field's downhill gradient at any of 256 angles.
+/// A fully open tile whose whole boundary heads for one anchor skips the
+/// solve: every cell points straight at the anchor.
 fn build_tile(
     fs: &FlowSystem,
     map: &Map,
@@ -915,17 +1190,26 @@ fn build_tile(
     heap.len = 0;
     let goal = &fs.goals[g as usize];
     let (tx, ty) = (t & (map.tdim - 1), t >> map.tshift);
-    let (cx0, cy0) = (tx * TILE, ty * TILE);
+    let (cx0, cy0) = ((tx * TILE) as i32 - 1, (ty * TILE) as i32 - 1);
+    // Ring coordinates: interior cell (lx, ly) is (lx + 1, ly + 1).
+    let mut open = [false; RING_CELLS];
+    for (r, o) in open.iter_mut().enumerate() {
+        let (gx, gy) = (cx0 + (r % RING) as i32, cy0 + (r / RING) as i32);
+        *o = gx >= 0 && gy >= 0 && map.walkable(gx as u32, gy as u32);
+    }
+    let ring = |i: usize| (i >> 4) * RING + (i & 15) + RING + 1;
     let mut comp = [u8::MAX; 256];
-    for i in 0..256u32 {
-        if let Some(c) = map.comp_of(cx0 + (i & 15), cy0 + (i >> 4)) {
-            comp[i as usize] = c;
+    for (i, c) in comp.iter_mut().enumerate() {
+        if let Some(k) = map.comp_of(tx * TILE + (i as u32 & 15), ty * TILE + (i as u32 >> 4)) {
+            *c = k;
         }
     }
-    // Per-cell step factor from crowding, gas and fire (per 2 m field cell).
-    let mut factor = [10u32; 256];
+    // Slowness: the cost of one cell step (10 on open ground), from
+    // crowding, gas and fire per 2 m field cell.
+    let mut slow = [10.0f32; 256];
     let fx0 = tx as f32 * TILE_M - map.half;
     let fy0 = ty as f32 * TILE_M - map.half;
+    let mut uniform = true;
     for qy in 0..4 {
         for qx in 0..4 {
             let p = Vec2::new(fx0 + qx as f32 * 2.0 + 1.0, fy0 + qy as f32 * 2.0 + 1.0);
@@ -936,126 +1220,258 @@ fn build_tile(
                 + tun.flow_gas_cost * gas
                 + tun.flow_fire_cost * fire)
                 .clamp(0.0, 24.0);
-            let f = 10 + (pen * 10.0) as u32;
+            let f = 10.0 + pen * 10.0;
+            uniform &= f == 10.0;
             for ly in 0..4 {
                 for lx in 0..4 {
-                    factor[((qy * 4 + ly) * 16 + qx * 4 + lx) as usize] = f;
+                    slow[(qy * 4 + ly) * 16 + qx * 4 + lx] = f;
                 }
             }
         }
     }
-    let mut integ = [INF; 256];
-    // border_dir[i]: heading + 1 toward the downhill tile that seeded cell i.
-    let mut border_dir = [0u8; 256];
+    let mut time = [f32::INFINITY; RING_CELLS];
+    let mut done = [false; RING_CELLS];
     let mut goal_cell = [false; 256];
     let r2 = goal.radius * goal.radius;
+    let mut goals = false;
     for i in 0..256usize {
         if comp[i] == u8::MAX {
             continue;
         }
-        let (wx, wy) = map.nav.centre(cx0 + (i as u32 & 15), cy0 + (i as u32 >> 4));
+        let (wx, wy) = map
+            .nav
+            .centre(tx * TILE + (i as u32 & 15), ty * TILE + (i as u32 >> 4));
         let p = Vec2::new(wx, wy);
         if goal.targets.iter().any(|&q| (q - p).len2() <= r2) {
-            integ[i] = 0;
             goal_cell[i] = true;
-            heap.push(0, i as u16);
+            goals = true;
+            time[ring(i)] = 0.0;
+            heap.push(0, ring(i) as u16);
         }
     }
-    // Seeds from downhill neighbours.
-    for (dx, dy, heading) in [(1i32, 0i32, 0u8), (-1, 0, 128), (0, 1, 64), (0, -1, 192)] {
-        let (nx, ny) = (tx as i32 + dx, ty as i32 + dy);
-        if nx < 0 || ny < 0 || nx >= map.tdim as i32 || ny >= map.tdim as i32 {
+
+    // The ring: cells of downhill neighbour tiles, valued from their tile's
+    // cost and anchor. `one` is the anchor they all share, if they do.
+    const UNSET: u32 = u32::MAX - 2;
+    let mut one = UNSET;
+    let mut own_cost = [INF; 4];
+    for (c, o) in own_cost
+        .iter_mut()
+        .enumerate()
+        .take(map.tile_ncomp(t) as usize)
+    {
+        *o = fs.tile_cost(map, g, t, c as u8);
+    }
+    // What the ring needs from each neighbour tile component, looked up once:
+    // cost, anchor, anchor position and radius, step factor, and the anchor
+    // distance its cost stands for.
+    #[derive(Clone, Copy)]
+    struct Nb {
+        cost: u32,
+        anchor: u32,
+        at: Option<(Vec2, f32)>,
+        factor: f32,
+        from: f32,
+    }
+    let mut nbs: [[Option<Nb>; MAX_COMP]; 9] = [[None; MAX_COMP]; 9];
+    for r in 0..RING_CELLS {
+        let (x, y) = (r % RING, r / RING);
+        if !open[r] || (x > 0 && x < RING - 1 && y > 0 && y < RING - 1) {
             continue;
         }
-        let nt = map.tile_index(nx as u32, ny as u32);
-        for k in 0..TILE {
-            let (lx, ly) = match (dx, dy) {
-                (1, _) => (15, k),
-                (-1, _) => (0, k),
-                (_, 1) => (k, 15),
-                _ => (k, 0),
+        let (gx, gy) = ((cx0 + x as i32) as u32, (cy0 + y as i32) as u32);
+        let Some(nc) = map.comp_of(gx, gy) else {
+            continue;
+        };
+        // Downhill from the tile components this cell borders.
+        let mut own = INF;
+        for (dx, dy) in [(0i32, 0i32), (1, 0), (-1, 0), (0, 1), (0, -1)] {
+            let (ix, iy) = (
+                (x as i32 + dx).clamp(1, RING as i32 - 2) - 1,
+                (y as i32 + dy).clamp(1, RING as i32 - 2) - 1,
+            );
+            let c = comp[(iy * 16 + ix) as usize];
+            if c != u8::MAX {
+                own = own.min(own_cost[c as usize]);
+            }
+        }
+        let nt = map.tile_index(gx >> 4, gy >> 4);
+        // Which of the 3 × 3 tiles around this one the cell is in.
+        let third = |v: usize| {
+            if v == 0 {
+                0
+            } else if v == RING - 1 {
+                2
+            } else {
+                1
+            }
+        };
+        let nb = *nbs[third(y) * 3 + third(x)][nc as usize].get_or_insert_with(|| {
+            let cost = fs.tile_cost(map, g, nt, nc);
+            let anchor = fs.tile_anchor(map, g, nt, nc);
+            let at = fs.anchor_point(map, g, anchor);
+            let from = match at {
+                // A goal tile costs 0 however far its centre is from the disc.
+                Some(_) if anchor & ANCHOR_TARGET != 0 && cost == 0 => 0.0,
+                Some((ap, ar)) => anchor_dist(ap, ar, tile_centre(map, nt)),
+                None => 0.0,
             };
-            let i = (ly * 16 + lx) as usize;
-            if comp[i] == u8::MAX || goal_cell[i] {
-                continue;
+            Nb {
+                cost,
+                anchor,
+                at,
+                factor: fs.tile_step(map, g, nt) as f32 * (1.0 / TILE_STEP as f32),
+                from,
             }
-            let (ox, oy) = ((cx0 + lx) as i32 + dx, (cy0 + ly) as i32 + dy);
-            let Some(nc) = map.comp_of(ox as u32, oy as u32) else {
-                continue;
-            };
-            let own = fs.tile_cost(map, g, t, comp[i]);
-            let theirs = fs.tile_cost(map, g, nt, nc);
-            if theirs == INF || theirs >= own {
-                continue;
+        });
+        let theirs = nb.cost;
+        if theirs == INF || theirs >= own {
+            continue;
+        }
+        let v = match nb.at {
+            Some((ap, ar)) => {
+                let (wx, wy) = map.nav.centre(gx, gy);
+                let d = anchor_dist(ap, ar, Vec2::new(wx, wy)) - nb.from;
+                one = if one == UNSET || one == nb.anchor {
+                    nb.anchor
+                } else {
+                    NONE
+                };
+                // Heap keys are float bits: never -0.0.
+                let v = theirs as f32 + d * COST_PER_M * nb.factor;
+                if v > 0.0 { v } else { 0.0 }
             }
-            let v = theirs.saturating_add(TILE_STEP / 2);
-            if v < integ[i] {
-                integ[i] = v;
-                border_dir[i] = heading.wrapping_add(1).max(1);
-                heap.push(v, i as u16);
+            None => {
+                one = NONE;
+                (theirs + TILE_STEP / 2) as f32 - 10.0
             }
+        };
+        if v < time[r] {
+            time[r] = v;
+            heap.push(v.to_bits(), r as u16);
         }
     }
-    while let Some((c, i)) = heap.pop() {
-        let i = i as usize;
-        if c > integ[i] {
+
+    // Open ground heading for one anchor: straight at it.
+    if !goals
+        && uniform
+        && one != UNSET
+        && map.tiles[t as usize] == OPEN
+        && let Some((ap, _)) = fs.anchor_point(map, g, one)
+    {
+        for (i, o) in out.iter_mut().enumerate() {
+            let (wx, wy) = map
+                .nav
+                .centre(tx * TILE + (i as u32 & 15), ty * TILE + (i as u32 >> 4));
+            let d = ap - Vec2::new(wx, wy);
+            *o = heading_of(d.x, d.y).wrapping_add(1).max(1);
+        }
+        heap.len = 0;
+        return;
+    }
+
+    // Fast Marching: accept the smallest tentative time, update its
+    // interior neighbours from their accepted neighbours.
+    let known = |done: &[bool; RING_CELLS], time: &[f32; RING_CELLS], k: usize| {
+        if done[k] { time[k] } else { f32::INFINITY }
+    };
+    while let Some((bits, r)) = heap.pop() {
+        let r = r as usize;
+        if done[r] || f32::from_bits(bits) > time[r] {
             continue;
         }
-        let (x, y) = ((i & 15) as i32, (i >> 4) as i32);
-        for &(dx, dy, base) in &NBR8 {
+        done[r] = true;
+        let (x, y) = ((r % RING) as i32, (r / RING) as i32);
+        for &(dx, dy) in &NBR8 {
             let (nx, ny) = (x + dx, y + dy);
-            if !(0..16).contains(&nx) || !(0..16).contains(&ny) {
+            if !(1..=TILE as i32).contains(&nx) || !(1..=TILE as i32).contains(&ny) {
                 continue;
             }
-            let n = (ny * 16 + nx) as usize;
-            if comp[n] == u8::MAX {
+            let n = ny as usize * RING + nx as usize;
+            if done[n] || !open[n] {
                 continue;
             }
-            if dx != 0
-                && dy != 0
-                && (comp[(y * 16 + nx) as usize] == u8::MAX
-                    || comp[(ny * 16 + x) as usize] == u8::MAX)
-            {
-                continue;
+            let f = slow[(ny as usize - 1) * 16 + nx as usize - 1];
+            let a = known(&done, &time, n - 1).min(known(&done, &time, n + 1));
+            let b = known(&done, &time, n - RING).min(known(&done, &time, n + RING));
+            let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+            let mut v = if hi - lo >= f {
+                lo + f
+            } else {
+                // Both axes: the front arrives at an angle.
+                0.5 * (lo + hi + (2.0 * f * f - (hi - lo) * (hi - lo)).sqrt())
+            };
+            for &(ex, ey) in &[(1i32, 1i32), (-1, 1), (-1, -1), (1, -1)] {
+                let d = (ny + ey) as usize * RING + (nx + ex) as usize;
+                if done[d]
+                    && open[ny as usize * RING + (nx + ex) as usize]
+                    && open[(ny + ey) as usize * RING + nx as usize]
+                {
+                    v = v.min(time[d] + f * std::f32::consts::SQRT_2);
+                }
             }
-            let nc = c.saturating_add(base * factor[n] / 10);
-            if nc < integ[n] {
-                integ[n] = nc;
-                heap.push(nc, n as u16);
+            if v < time[n] {
+                time[n] = v;
+                heap.push(v.to_bits(), n as u16);
             }
         }
     }
-    // Directions: toward the lowest neighbour, or across the seeding border.
+
+    // Directions: the downhill (upwind) gradient.
     for i in 0..256usize {
-        if comp[i] == u8::MAX || integ[i] == INF || goal_cell[i] {
+        if comp[i] == u8::MAX || goal_cell[i] {
             continue;
         }
-        let (x, y) = ((i & 15) as i32, (i >> 4) as i32);
-        let mut best = integ[i];
-        let mut dir = border_dir[i];
-        for (k, &(dx, dy, _)) in NBR8.iter().enumerate() {
-            let (nx, ny) = (x + dx, y + dy);
-            if !(0..16).contains(&nx) || !(0..16).contains(&ny) {
-                continue;
-            }
-            let n = (ny * 16 + nx) as usize;
-            if comp[n] == u8::MAX {
-                continue;
-            }
-            if dx != 0
-                && dy != 0
-                && (comp[(y * 16 + nx) as usize] == u8::MAX
-                    || comp[(ny * 16 + x) as usize] == u8::MAX)
-            {
-                continue;
-            }
-            if integ[n] < best {
-                best = integ[n];
-                dir = (k as u8 * 32).wrapping_add(1);
+        let r = ring(i);
+        let here = time[r];
+        if !here.is_finite() {
+            continue;
+        }
+        let (l, rt, u, d) = (time[r - 1], time[r + 1], time[r - RING], time[r + RING]);
+        let mut gx = if rt < l && rt < here {
+            here - rt
+        } else if l < here {
+            l - here
+        } else {
+            0.0
+        };
+        let mut gy = if d < u && d < here {
+            here - d
+        } else if u < here {
+            u - here
+        } else {
+            0.0
+        };
+        // Never cut across a blocked corner.
+        if gx != 0.0 && gy != 0.0 {
+            let (sx, sy) = (if gx > 0.0 { 1 } else { -1 }, if gy > 0.0 { 1 } else { -1 });
+            if !open[(r as i32 + sy * RING as i32 + sx) as usize] {
+                if gx.abs() < gy.abs() {
+                    gx = 0.0;
+                } else {
+                    gy = 0.0;
+                }
             }
         }
-        out[i] = dir;
+        out[i] = if gx != 0.0 || gy != 0.0 {
+            heading_of(gx, gy).wrapping_add(1).max(1)
+        } else {
+            // Degenerate gradient: the steepest walkable neighbour.
+            let mut best = (here, 0u8);
+            for (k, &(dx, dy)) in NBR8.iter().enumerate() {
+                let n = (r as i32 + dy * RING as i32 + dx) as usize;
+                let corner = dx == 0
+                    || dy == 0
+                    || (open[(r as i32 + dx) as usize]
+                        && open[(r as i32 + dy * RING as i32) as usize]);
+                if corner && time[n] < best.0 {
+                    best = (time[n], (k as u8 * 32).wrapping_add(1));
+                }
+            }
+            best.1
+        };
     }
+    heap.len = 0;
 }
 
 /// Decode a direction byte into a unit vector (zero for "no direction").
@@ -1161,7 +1577,56 @@ pub fn sample_flow(fs: &FlowSystem, map: &Map, g: u8, p: Vec2, rec: &mut Vec<u64
             return FlowSample::Dir(d);
         }
     }
-    FlowSample::Missing
+    match coarse_dir(fs, map, g, p) {
+        Some(d) => FlowSample::Dir(d),
+        None => FlowSample::Missing,
+    }
+}
+
+/// The way to goal `g` from `p` while its flow tile is still being built,
+/// from the tile costs: straight at the tile's anchor on open ground,
+/// otherwise across the border into the cheapest neighbouring tile. `None`
+/// when the tile has no cost yet.
+fn coarse_dir(fs: &FlowSystem, map: &Map, g: u8, p: Vec2) -> Option<Vec2> {
+    let (cx, cy) = map.cell_of(p)?;
+    let c = map.comp_of(cx, cy)?;
+    let t = map.tile_index(cx >> 4, cy >> 4);
+    let own = fs.tile_cost(map, g, t, c);
+    if own == INF {
+        return None;
+    }
+    if map.tiles[t as usize] == OPEN
+        && let Some((a, _)) = fs.anchor_point(map, g, fs.tile_anchor(map, g, t, c))
+    {
+        let d = (a - p).normalize_or_zero();
+        if d != Vec2::ZERO {
+            return Some(d);
+        }
+    }
+    let mut best = (own, Vec2::ZERO);
+    for (dir, step) in [
+        Vec2::new(1.0, 0.0),
+        Vec2::new(-1.0, 0.0),
+        Vec2::new(0.0, 1.0),
+        Vec2::new(0.0, -1.0),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let Some(nt) = map.neighbour_tile(t, dir) else {
+            continue;
+        };
+        let row = (map.tile_links(t, dir) >> (c * 4)) & 0xf;
+        for b in 0..4u8 {
+            if row & (1 << b) != 0 {
+                let cost = fs.tile_cost(map, g, nt, b);
+                if cost < best.0 {
+                    best = (cost, step);
+                }
+            }
+        }
+    }
+    (best.1 != Vec2::ZERO).then_some(best.1)
 }
 
 #[cfg(test)]
@@ -1185,13 +1650,42 @@ mod tests {
         start: Vec2,
         ticks: u32,
     ) -> (Vec2, bool) {
+        let w = walk_path(fs, map, fields, g, start, ticks, 0.0);
+        (w.end, w.arrived)
+    }
+
+    struct Walk {
+        end: Vec2,
+        arrived: bool,
+        /// Distance walked (m).
+        length: f32,
+        /// Every point visited, one per step.
+        path: Vec<Vec2>,
+    }
+
+    /// Follow the flow in 0.1 m steps, sliding along walls like a body
+    /// would, with tiles swapped in after `latency` ticks.
+    fn walk_path(
+        fs: &mut FlowSystem,
+        map: &Map,
+        fields: &Fields,
+        g: u8,
+        start: Vec2,
+        ticks: u32,
+        latency: f32,
+    ) -> Walk {
         let tun = Tunables {
-            flow_latency: 0.0,
+            flow_latency: latency,
             ..Default::default()
         };
         let mut p = start;
         let mut rec = Vec::with_capacity(512);
-        let mut arrived = false;
+        let mut w = Walk {
+            end: start,
+            arrived: false,
+            length: 0.0,
+            path: vec![start],
+        };
         for tick in 0..ticks {
             rec.clear();
             let s = sample_flow(fs, map, g, p, &mut rec);
@@ -1199,19 +1693,205 @@ mod tests {
             fs.update(map, fields, &tun, tick);
             match s {
                 FlowSample::Dir(d) => {
-                    let np = p + d * 0.1;
-                    if map.walkable_at(np) {
-                        p = np;
+                    let step = d * 0.1;
+                    for np in [
+                        p + step,
+                        p + Vec2::new(step.x, 0.0),
+                        p + Vec2::new(0.0, step.y),
+                    ] {
+                        if np != p && map.walkable_at(np) {
+                            w.length += (np - p).len();
+                            p = np;
+                            w.path.push(p);
+                            break;
+                        }
                     }
                 }
                 FlowSample::Arrived => {
-                    arrived = true;
+                    w.arrived = true;
                     break;
                 }
                 FlowSample::Missing => {}
             }
         }
-        (p, arrived)
+        w.end = p;
+        w
+    }
+
+    fn open_map(size: f32, solids: Vec<Polygon>) -> (Map, Fields, FlowSystem) {
+        let def = MapDef {
+            name: "test".into(),
+            width: size,
+            height: size,
+            solids,
+            ..Default::default()
+        };
+        let map = Map::build(&def, 0.45).unwrap();
+        let fields = Fields::new(map.size, 4);
+        let fs = FlowSystem::new(&map, 4096, 256, 1);
+        (map, fields, fs)
+    }
+
+    #[test]
+    fn open_ground_routes_are_straight() {
+        // Any-angle: across open ground people walk the straight line, not
+        // an 8-direction or Manhattan staircase, at every angle.
+        for (k, start) in [
+            Vec2::new(-100.0, -60.0),
+            Vec2::new(-90.0, 20.0),
+            Vec2::new(30.0, -110.0),
+            Vec2::new(-20.0, 95.0),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (map, fields, mut fs) = open_map(512.0, vec![]);
+            let target = Vec2::new(100.0, 60.0) * if k == 3 { -1.0 } else { 1.0 };
+            let r = 3.0;
+            fs.set_targets(0, &[target], r, 0);
+            let w = walk_path(&mut fs, &map, &fields, 0, start, 6000, 0.0);
+            assert!(w.arrived, "stuck at {:?}", w.end);
+            let ideal = (target - start).len() - r;
+            let ratio = w.length / ideal;
+            eprintln!(
+                "open route {k}: walked {:.1} m, ideal {ideal:.1} m, ratio {ratio:.4}",
+                w.length
+            );
+            // And it stays near the line the whole way.
+            let dir = (target - start).normalize_or_zero();
+            let off = w
+                .path
+                .iter()
+                .map(|&q| (q - start).cross(dir).abs())
+                .fold(0.0f32, f32::max);
+            eprintln!("open route {k}: largest offset from the line {off:.2} m");
+            assert!(ratio < 1.01, "route {k}: {ratio}");
+            assert!(off < 1.0, "route {k} strays {off} m");
+        }
+    }
+
+    #[test]
+    fn city_routes_arrive_without_detours() {
+        // The test district: 64 m blocks, 11.5 m streets, a square in the
+        // middle. Walkers cross it from every side to the square.
+        let def = crate::testkit::district(512.0, 64.0);
+        let map = Map::build(&def, 0.45).unwrap();
+        let fields = Fields::new(map.size, 4);
+        let target = Vec2::new(0.0, 0.0);
+        let mut total = (0.0, 0.0);
+        for start in [
+            Vec2::new(-224.0, -160.0),
+            Vec2::new(224.0, -96.0),
+            Vec2::new(-96.0, 224.0),
+            Vec2::new(160.0, 160.0),
+            Vec2::new(-224.0, 32.0),
+            Vec2::new(32.0, -224.0),
+        ] {
+            let start = map.nearest_open(start, 20.0).unwrap();
+            let mut fs = FlowSystem::new(&map, 4096, 256, 1);
+            fs.set_targets(0, &[target], 6.0, 0);
+            let w = walk_path(&mut fs, &map, &fields, 0, start, 20_000, 0.0);
+            assert!(w.arrived, "from {start:?} stuck at {:?}", w.end);
+            let ratio = w.length / ((target - start).len() - 6.0);
+            eprintln!(
+                "city route from {start:?}: walked {:.1} m, {ratio:.3} × straight",
+                w.length
+            );
+            total.0 += w.length;
+            total.1 += (target - start).len() - 6.0;
+        }
+        let ratio = total.0 / total.1;
+        eprintln!("city routes: {ratio:.3} × straight overall");
+        assert!(ratio < 1.18, "{ratio}");
+    }
+
+    /// `cargo test -p riot_sim --lib dump_anchors -- --ignored --nocapture`
+    /// prints the tile anchors around a goal: the cost error in route units
+    /// for tiles heading straight for the goal, else the offset (in tiles)
+    /// of the tile they turn at.
+    #[test]
+    #[ignore]
+    fn dump_anchors() {
+        let (map, fields, mut fs) = open_map(512.0, vec![]);
+        let target = Vec2::new(100.0, 60.0);
+        fs.set_targets(0, &[target], 3.0, 0);
+        let _ = walk_path(
+            &mut fs,
+            &map,
+            &fields,
+            0,
+            Vec2::new(-100.0, -60.0),
+            3000,
+            0.0,
+        );
+        for ty in 20..40u32 {
+            let mut line = String::new();
+            for tx in 18..47u32 {
+                let t = map.tile_index(tx, ty);
+                let a = fs.tile_anchor(&map, 0, t, 0);
+                let c = fs.tile_cost(&map, 0, t, 0);
+                let exact = ((anchor_dist(target, 3.0, tile_centre(&map, t))) * 20.0) as i64;
+                line.push_str(&if a == NONE {
+                    "   .  ".to_string()
+                } else if a & ANCHOR_TARGET != 0 {
+                    format!("{:+5} ", c as i64 - exact)
+                } else {
+                    let (ax, ay) = (
+                        ((a >> 2) & (map.tdim - 1)) as i32,
+                        ((a >> 2) >> map.tshift) as i32,
+                    );
+                    format!("{:>2},{:<2} ", ax - tx as i32, ay - ty as i32)
+                });
+            }
+            eprintln!("{line}");
+        }
+    }
+
+    #[test]
+    fn routes_bend_at_the_corner() {
+        // A building between start and goal: the shortest way passes its
+        // nearer (south) corners, so walkers should cut close to them.
+        let (map, fields, mut fs) = open_map(512.0, vec![rect(-10.0, -50.0, 10.0, 20.0)]);
+        let (start, target, r) = (Vec2::new(-60.0, 0.0), Vec2::new(60.0, 0.0), 3.0);
+        fs.set_targets(0, &[target], r, 0);
+        let w = walk_path(&mut fs, &map, &fields, 0, start, 6000, 0.0);
+        assert!(w.arrived, "stuck at {:?}", w.end);
+        // Geodesic around the corners (-10, 20) and (10, 20), ending at the
+        // goal disc.
+        let c0 = Vec2::new(-10.0, 20.0);
+        let c1 = Vec2::new(10.0, 20.0);
+        let ideal = (c0 - start).len() + 20.0 + (target - c1).len() - r;
+        let ratio = w.length / ideal;
+        let widest = w.path.iter().map(|q| q.y).fold(0.0f32, f32::max);
+        eprintln!(
+            "corner route: walked {:.1} m, geodesic {ideal:.1} m, ratio {ratio:.4}, widest y {widest:.1}",
+            w.length
+        );
+        assert!(ratio < 1.03, "{ratio}");
+        assert!(
+            widest < 26.0,
+            "swings {widest} m wide of a corner at y = 20"
+        );
+    }
+
+    #[test]
+    fn pending_tiles_do_not_walk_into_walls() {
+        // While flow tiles are pending (latency 10), the walker follows the
+        // coarse route instead of a straight line into the building.
+        let (map, fields, mut fs) = open_map(512.0, vec![rect(-10.0, -50.0, 10.0, 20.0)]);
+        let (start, target) = (Vec2::new(-30.0, 0.0), Vec2::new(60.0, 0.0));
+        fs.set_targets(0, &[target], 3.0, 0);
+        let w = walk_path(&mut fs, &map, &fields, 0, start, 6000, 10.0);
+        assert!(w.arrived, "stuck at {:?}", w.end);
+        let ideal =
+            (Vec2::new(-10.0, 20.0) - start).len() + 20.0 + (target - Vec2::new(10.0, 20.0)).len()
+                - 3.0;
+        eprintln!(
+            "pending route: walked {:.1} m, geodesic {ideal:.1} m, ratio {:.4}",
+            w.length,
+            w.length / ideal
+        );
+        assert!(w.length / ideal < 1.05);
     }
 
     #[test]
