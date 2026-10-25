@@ -1,0 +1,17 @@
+[package]
+name = "riot_data_tunables"
+description = "RON tunables files and the SetTunable commands of a hot reload."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+riot_data_core.workspace = true
+# Only `Tunables`, `TUNABLES`, `Command` and `CommandKind`.
+riot_sim.workspace = true
+serde.workspace = true
+ron.workspace = true
+
+[lints]
+workspace = true

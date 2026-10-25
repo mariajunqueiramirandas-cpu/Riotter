@@ -85,15 +85,9 @@ impl std::error::Error for DataError {
 /// `Result` with a [`DataError`].
 pub type Result<T, E = DataError> = std::result::Result<T, E>;
 
-/// Turns a RON error into a [`DataError`] with its line and column.
-pub(crate) fn ron_error(e: ron::error::SpannedError) -> DataError {
-    let p = e.span.start;
-    DataError::caused_by(format!("line {}, column {}: {}", p.line, p.col, e.code), e)
-}
-
 /// Line (1-based) of the first occurrence of `needle` in `text`, for errors
 /// found after parsing.
-pub(crate) fn line_of(text: &str, needle: &str) -> Option<usize> {
+pub fn line_of(text: &str, needle: &str) -> Option<usize> {
     text.find(needle)
         .map(|at| text[..at].bytes().filter(|&b| b == b'\n').count() + 1)
 }

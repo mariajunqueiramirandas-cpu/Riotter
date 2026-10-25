@@ -1,6 +1,6 @@
 //! Procedural city generator (DESIGN §2.1). It writes a Tiled JSON map that
 //! follows the convention in `data/maps/README.md`, so a generated city loads
-//! through [`crate::tiled`] like a hand-made map and opens in Tiled for
+//! through [`riot_data_tiled`] like a hand-made map and opens in Tiled for
 //! editing.
 //!
 //! The layout, coarse to fine:
@@ -19,14 +19,20 @@
 //!    road graph along every street centreline and the 4 m ground layer.
 //!
 //! All randomness comes from a small counter-based hash RNG with one stream
-//! per purpose, and trigonometry from [`crate::math`], so a seed gives the
-//! same city on every machine. Coordinates here are metres from the map's
-//! top-left corner, y down; they become Tiled pixels on output.
+//! per purpose, and trigonometry from [`riot_data_core::math`], so a seed
+//! gives the same city on every machine. Coordinates here are metres from the
+//! map's top-left corner, y down; they become Tiled pixels on output.
+//!
+//! The generator itself is plain code: it fills in `riot_data_tiled`'s file
+//! model, and that crate writes the JSON and converts the model to a
+//! `MapDef`.
 
 use riot_sim::mapdef::{Ground, MapDef, PropKind, SolidKind};
 
-use crate::math::{point_in_polygon, seg_dist2, sin, sin_cos_deg};
-use crate::tiled::{self, Layer, Object, Property, Pt, TileDef, TiledMap, Tileset};
+use riot_data_core::math::{point_in_polygon, seg_dist2, sin, sin_cos_deg};
+use riot_data_tiled::{
+    self as tiled, Layer, Object, Property, Pt, TileDef, TiledMap, Tileset, serde_json,
+};
 
 /// Ground tile size in metres.
 pub const TILE_M: f32 = 4.0;
@@ -98,12 +104,16 @@ impl Default for CityParams {
 
 /// The city as a Tiled JSON map.
 pub fn generate(params: &CityParams) -> serde_json::Value {
-    serde_json::to_value(generate_tiled(params)).expect("a generated map serializes")
+    generate_tiled(params)
+        .to_json_value()
+        .expect("a generated map serializes")
 }
 
 /// The city as compact Tiled JSON text, ready to write to a `.json` file.
 pub fn generate_json(params: &CityParams) -> String {
-    serde_json::to_string(&generate_tiled(params)).expect("a generated map serializes")
+    generate_tiled(params)
+        .to_json()
+        .expect("a generated map serializes")
 }
 
 /// The city as a `MapDef`, exactly as loading [`generate`]'s JSON would give.
@@ -112,7 +122,7 @@ pub fn generate_mapdef(params: &CityParams) -> MapDef {
         .expect("generated maps follow the Tiled convention")
 }
 
-pub(crate) fn generate_tiled(params: &CityParams) -> TiledMap {
+fn generate_tiled(params: &CityParams) -> TiledMap {
     City::build(params).into_tiled(params)
 }
 
@@ -2407,7 +2417,7 @@ fn shape_object(o: Object, shape: &Shape) -> Object {
 
 /// The embedded ground tileset: one 16 px tile per ground kind, drawn from
 /// `ground.png` next to the map.
-pub(crate) fn ground_tileset() -> Tileset {
+fn ground_tileset() -> Tileset {
     Tileset {
         firstgid: 1,
         name: "ground".into(),

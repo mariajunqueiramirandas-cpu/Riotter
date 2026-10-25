@@ -1,0 +1,26 @@
+[package]
+name = "riot_data_citygen"
+description = "Procedural cities up to 8 km across, written as Tiled maps."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# No serde: the generator fills in riot_data_tiled's file model, and that
+# crate serializes and converts it.
+[dependencies]
+riot_data_core.workspace = true
+riot_data_tiled.workspace = true
+# Only the map definition types (`riot_sim::mapdef`).
+riot_sim.workspace = true
+# The ground tileset's PNG.
+miniz_oxide.workspace = true
+
+[dev-dependencies]
+# The tests walk the nav map (`riot_sim::map::Map`) and run riots
+# (`riot_sim::World`); its API takes riot_core::Vec2.
+riot_sim.workspace = true
+riot_core.workspace = true
+
+[lints]
+workspace = true

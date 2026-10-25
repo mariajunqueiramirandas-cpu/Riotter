@@ -19,7 +19,7 @@ use riot_sim::{Command, CommandKind, TUNABLES, Tunables};
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 
-use crate::error::{DataError, Result, line_of, ron_error};
+use riot_data_core::{DataError, Result, line_of};
 
 /// Parses a tunables file into `(name, value)` pairs, in file order. Every
 /// name must be a tunable, at most once.
@@ -68,7 +68,7 @@ pub fn load_tunables(path: &Path) -> Result<Tunables> {
 }
 
 /// Sets each named tunable (names already checked by [`parse_tunables`]).
-pub(crate) fn apply(t: &mut Tunables, values: &[(String, f32)]) {
+pub fn apply(t: &mut Tunables, values: &[(String, f32)]) {
     for (name, v) in values {
         t.set_by_name(name, *v);
     }
@@ -137,6 +137,13 @@ fn edit_distance(a: &str, b: &str) -> usize {
         }
     }
     row[b.len()]
+}
+
+/// Turns a RON error into a [`DataError`] with its line and column (for
+/// every RON file: tunables here, scenarios in `riot_data_scenario`).
+pub fn ron_error(e: ron::error::SpannedError) -> DataError {
+    let p = e.span.start;
+    DataError::caused_by(format!("line {}, column {}: {}", p.line, p.col, e.code), e)
 }
 
 /// Map entries in file order (a `BTreeMap` would sort them and lose

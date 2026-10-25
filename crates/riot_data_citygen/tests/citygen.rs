@@ -1,11 +1,12 @@
 //! The procedural city: sound geometry, connected streets, runnable riots.
 //! Slow 8 km checks are `#[ignore]`d; run them in release:
-//! `cargo test --release -p riot_data --test citygen -- --ignored`.
+//! `cargo test --release -p riot_data_citygen --test citygen -- --ignored`.
 
 use std::time::Instant;
 
 use riot_core::Vec2;
-use riot_data::citygen::{self, CityParams};
+use riot_data_citygen::{self as citygen, CityParams};
+use riot_data_tiled::parse_map;
 use riot_sim::map::Map;
 use riot_sim::mapdef::{EntryKind, MapDef, SolidKind};
 use riot_sim::setup::{Arrival, ObjectiveDef, ObjectiveKind, SquadDef, SquadKind};
@@ -323,14 +324,14 @@ fn json_round_trips_through_the_loader() {
         ..CityParams::new(1024.0, 7)
     };
     let json = citygen::generate_json(&p);
-    let loaded = riot_data::parse_map(&json, &p.map_name()).unwrap();
+    let loaded = parse_map(&json, &p.map_name()).unwrap();
     assert_eq!(loaded, citygen::generate_mapdef(&p));
     // The `Value` form sorts keys but holds the same map.
     let value = citygen::generate(&p).to_string();
-    assert_eq!(riot_data::parse_map(&value, &p.map_name()).unwrap(), loaded);
+    assert_eq!(parse_map(&value, &p.map_name()).unwrap(), loaded);
     let compressed = citygen::generate_json(&CityParams::new(1024.0, 7));
     assert!(compressed.len() < json.len());
-    let loaded = riot_data::parse_map(&compressed, &p.map_name()).unwrap();
+    let loaded = parse_map(&compressed, &p.map_name()).unwrap();
     assert_eq!(loaded, citygen::generate_mapdef(&p));
 }
 
@@ -371,7 +372,7 @@ fn odd_parameters_still_make_a_city() {
                     max_props: if seed == 2 { 0 } else { 6000 },
                     ..CityParams::new(size, seed + n)
                 };
-                let def = riot_data::parse_map(&citygen::generate_json(&p), "odd")
+                let def = parse_map(&citygen::generate_json(&p), "odd")
                     .unwrap_or_else(|e| panic!("{p:?}: {e}"));
                 assert!(
                     def.width >= 512.0 && def.area("central_square").is_some(),
@@ -401,7 +402,7 @@ fn city_8km() {
     assert!(generated.as_secs_f32() < 10.0);
     assert!(json.len() < 10_000_000);
     let t = Instant::now();
-    let def = riot_data::parse_map(&json, &p.map_name()).unwrap();
+    let def = parse_map(&json, &p.map_name()).unwrap();
     eprintln!("parsed in {:.2?}", t.elapsed());
     assert_eq!((def.width, def.height), (8192.0, 8192.0));
     assert!(def.props.len() <= 6000, "{} props", def.props.len());

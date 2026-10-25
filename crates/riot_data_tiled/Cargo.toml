@@ -1,0 +1,19 @@
+[package]
+name = "riot_data_tiled"
+description = "Tiled JSON maps: the serde file model, its parser and the conversion to riot_sim's MapDef."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+riot_data_core.workspace = true
+# Only the map definition types (`riot_sim::mapdef`).
+riot_sim.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# Tiled's zlib/gzip tile layers; the 8 km city's ground layer is 4 M tiles.
+miniz_oxide.workspace = true
+
+[lints]
+workspace = true

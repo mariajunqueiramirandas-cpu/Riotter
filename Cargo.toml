@@ -5,6 +5,11 @@ default-members = [
     "crates/riot_core",
     "crates/riot_team",
     "crates/riot_sim",
+    "crates/riot_data_core",
+    "crates/riot_data_tiled",
+    "crates/riot_data_citygen",
+    "crates/riot_data_tunables",
+    "crates/riot_data_scenario",
     "crates/riot_data",
     "crates/riot_headless",
 ]
@@ -19,6 +24,11 @@ license = "MIT OR Apache-2.0"
 riot_core = { path = "crates/riot_core" }
 riot_team = { path = "crates/riot_team" }
 riot_sim = { path = "crates/riot_sim" }
+riot_data_core = { path = "crates/riot_data_core" }
+riot_data_tiled = { path = "crates/riot_data_tiled" }
+riot_data_citygen = { path = "crates/riot_data_citygen" }
+riot_data_tunables = { path = "crates/riot_data_tunables" }
+riot_data_scenario = { path = "crates/riot_data_scenario" }
 riot_data = { path = "crates/riot_data" }
 riot_render = { path = "crates/riot_render" }
 rayon = "1.12"
@@ -27,6 +37,9 @@ libm = "0.2.16"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 ron = "0.12"
+# Tiled's zlib/gzip tile layers and the ground tileset's PNG. Already in
+# Cargo.lock (macroquad → png), pure Rust, only depends on adler2.
+miniz_oxide = "0.8"
 macroquad = { version = "0.4.16", default-features = false }
 
 [workspace.lints.clippy]

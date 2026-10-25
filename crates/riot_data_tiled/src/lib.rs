@@ -10,6 +10,11 @@
 //! Tiled measures pixels from the top-left corner with y down; a `MapDef`
 //! measures metres from the centre of the map with y down, so
 //! `x_m = x_px · mpp − width_m / 2`.
+//!
+//! The file model ([`TiledMap`] and its parts) is public so the city
+//! generator (`riot_data_citygen`) can build maps without serde: it fills in
+//! the model, and [`TiledMap::to_json`] and [`convert`] do the rest here, so
+//! all serde code is compiled in this crate.
 
 use std::path::Path;
 
@@ -20,8 +25,12 @@ use riot_sim::mapdef::{
 use serde::de::{self, IgnoredAny, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::error::{DataError, Result};
-use crate::math::{seg_dist2, sin_cos_deg};
+use riot_data_core::math::{seg_dist2, sin_cos_deg};
+use riot_data_core::{DataError, Result};
+
+/// The JSON library the model is read and written with, re-exported for the
+/// `Value` of [`TiledMap::to_json_value`].
+pub use serde_json;
 
 /// Metres per Tiled pixel when the map has no `metres_per_pixel` property.
 pub const DEFAULT_METRES_PER_PIXEL: f64 = 0.25;
@@ -33,13 +42,13 @@ pub const ROAD_MERGE_M: f32 = 1.0;
 const GID_FLAGS: u32 = 0xF000_0000;
 
 // ---------------------------------------------------------------------------
-// The file format. Shared with `citygen`, which writes it: every optional
-// field is skipped when empty, so written maps stay small.
+// The file format. Shared with `riot_data_citygen`, which writes it: every
+// optional field is skipped when empty, so written maps stay small.
 
 /// A Tiled map as JSON (only what Riotter reads or writes).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
-pub(crate) struct TiledMap {
+pub struct TiledMap {
     #[serde(rename = "type")]
     pub kind: String,
     /// Tiled writes these as strings now and as numbers in old versions.
@@ -61,6 +70,18 @@ pub(crate) struct TiledMap {
     pub properties: Vec<Property>,
     pub tilesets: Vec<Tileset>,
     pub layers: Vec<Layer>,
+}
+
+impl TiledMap {
+    /// Compact JSON text, ready to write to a `.json` file.
+    pub fn to_json(&self) -> serde_json::Result<String> {
+        serde_json::to_string(self)
+    }
+
+    /// The map as a JSON `Value` (which sorts the keys).
+    pub fn to_json_value(&self) -> serde_json::Result<serde_json::Value> {
+        serde_json::to_value(self)
+    }
 }
 
 impl Default for TiledMap {
@@ -89,7 +110,7 @@ impl Default for TiledMap {
 /// A custom property (`{"name", "type", "value"}`).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
-pub(crate) struct Property {
+pub struct Property {
     pub name: String,
     #[serde(rename = "type")]
     pub kind: String,
@@ -128,7 +149,7 @@ impl Property {
 /// An embedded tileset, or a reference to an external one (`source`).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
-pub(crate) struct Tileset {
+pub struct Tileset {
     pub firstgid: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
@@ -157,7 +178,7 @@ pub(crate) struct Tileset {
 /// Per-tile data in a tileset.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
-pub(crate) struct TileDef {
+pub struct TileDef {
     pub id: u32,
     #[serde(rename = "type", skip_serializing_if = "String::is_empty")]
     pub kind: String,
@@ -171,7 +192,7 @@ pub(crate) struct TileDef {
 /// Any layer: `tilelayer`, `objectgroup`, `group` or `imagelayer`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
-pub(crate) struct Layer {
+pub struct Layer {
     #[serde(rename = "type")]
     pub kind: String,
     pub id: u32,
@@ -242,7 +263,7 @@ impl Default for Layer {
 /// `polygon` or `polyline` says otherwise; a `gid` makes it a tile object.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
-pub(crate) struct Object {
+pub struct Object {
     pub id: u32,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub name: String,
@@ -296,7 +317,7 @@ impl Object {
 /// A polygon or polyline vertex, relative to its object.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub(crate) struct Pt {
+pub struct Pt {
     #[serde(serialize_with = "ser_num")]
     pub x: f64,
     #[serde(serialize_with = "ser_num")]
@@ -305,7 +326,7 @@ pub(crate) struct Pt {
 
 /// Tile layer data: a plain array of global tile ids, or a base64 string.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum TileData {
+pub enum TileData {
     Gids(Vec<u32>),
     Encoded(String),
 }
@@ -346,7 +367,7 @@ impl<'de> Deserialize<'de> for TileData {
 }
 
 /// Writes integral values without a fraction (`12`, not `12.0`).
-pub(crate) fn ser_num<S: Serializer>(v: &f64, s: S) -> std::result::Result<S::Ok, S::Error> {
+fn ser_num<S: Serializer>(v: &f64, s: S) -> std::result::Result<S::Ok, S::Error> {
     if v.fract() == 0.0 && v.abs() < 1e15 {
         s.serialize_i64(*v as i64)
     } else {
@@ -370,7 +391,7 @@ fn is_false(v: &bool) -> bool {
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /// Standard base64 with padding.
-pub(crate) fn base64_encode(bytes: &[u8]) -> String {
+fn base64_encode(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for c in bytes.chunks(3) {
         let n = (c[0] as u32) << 16
@@ -388,7 +409,7 @@ pub(crate) fn base64_encode(bytes: &[u8]) -> String {
 }
 
 /// Standard base64; whitespace is skipped, padding is optional.
-pub(crate) fn base64_decode(s: &str) -> std::result::Result<Vec<u8>, String> {
+fn base64_decode(s: &str) -> std::result::Result<Vec<u8>, String> {
     let mut out = Vec::with_capacity(s.len() / 4 * 3);
     let (mut acc, mut bits) = (0u32, 0u32);
     for (i, ch) in s.bytes().enumerate() {
@@ -414,7 +435,7 @@ pub(crate) fn base64_decode(s: &str) -> std::result::Result<Vec<u8>, String> {
 
 /// Encodes global tile ids the way Tiled does: little-endian u32s, zlib
 /// compressed when `compress`, base64 (returns data, encoding, compression).
-pub(crate) fn encode_gids(gids: &[u32], compress: bool) -> (TileData, String, String) {
+pub fn encode_gids(gids: &[u32], compress: bool) -> (TileData, String, String) {
     if !compress {
         return (TileData::Gids(gids.to_vec()), String::new(), String::new());
     }
@@ -541,7 +562,7 @@ fn parse_in(json: &str, name: &str, dir: Option<&Path>) -> Result<MapDef> {
 }
 
 /// Converts a parsed Tiled map. `dir` resolves external tilesets.
-pub(crate) fn convert(map: &TiledMap, name: &str, dir: Option<&Path>) -> Result<MapDef> {
+pub fn convert(map: &TiledMap, name: &str, dir: Option<&Path>) -> Result<MapDef> {
     if !map.orientation.is_empty() && map.orientation != "orthogonal" {
         return Err(DataError::new(format!(
             "{} maps are not supported; use an orthogonal map",

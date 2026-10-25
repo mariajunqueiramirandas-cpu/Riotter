@@ -6,7 +6,7 @@ use std::f64::consts::PI;
 
 /// `(sin, cos)` of an angle in degrees: exact at multiples of 90°, otherwise
 /// accurate to about 1e-14.
-pub(crate) fn sin_cos_deg(deg: f64) -> (f64, f64) {
+pub fn sin_cos_deg(deg: f64) -> (f64, f64) {
     let d = deg.rem_euclid(360.0);
     let q = (d / 90.0).round();
     // r ∈ [-π/4, π/4], exactly 0 at multiples of 90°.
@@ -29,12 +29,12 @@ pub(crate) fn sin_cos_deg(deg: f64) -> (f64, f64) {
 }
 
 /// `sin` of an angle in radians (see [`sin_cos_deg`]).
-pub(crate) fn sin(rad: f64) -> f64 {
+pub fn sin(rad: f64) -> f64 {
     sin_cos_deg(rad * (180.0 / PI)).0
 }
 
 /// Is `p` inside the closed polygon `poly` (even-odd rule)?
-pub(crate) fn point_in_polygon(p: [f32; 2], poly: &[[f32; 2]]) -> bool {
+pub fn point_in_polygon(p: [f32; 2], poly: &[[f32; 2]]) -> bool {
     let mut inside = false;
     let n = poly.len();
     for i in 0..n {
@@ -51,7 +51,7 @@ pub(crate) fn point_in_polygon(p: [f32; 2], poly: &[[f32; 2]]) -> bool {
 }
 
 /// Squared distance from `p` to the segment `a → b`.
-pub(crate) fn seg_dist2(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
+pub fn seg_dist2(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
     let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
     let len2 = dx * dx + dy * dy;
     let t = if len2 > 0.0 {

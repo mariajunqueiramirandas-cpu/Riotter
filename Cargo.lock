@@ -388,12 +388,59 @@ dependencies = [
 name = "riot_data"
 version = "0.1.0"
 dependencies = [
+ "riot_data_citygen",
+ "riot_data_core",
+ "riot_data_scenario",
+ "riot_data_tiled",
+ "riot_data_tunables",
+ "riot_sim",
+]
+
+[[package]]
+name = "riot_data_citygen"
+version = "0.1.0"
+dependencies = [
  "miniz_oxide 0.8.9",
  "riot_core",
+ "riot_data_core",
+ "riot_data_tiled",
+ "riot_sim",
+]
+
+[[package]]
+name = "riot_data_core"
+version = "0.1.0"
+
+[[package]]
+name = "riot_data_scenario"
+version = "0.1.0"
+dependencies = [
+ "riot_data_core",
+ "riot_data_tunables",
  "riot_sim",
  "ron",
  "serde",
+]
+
+[[package]]
+name = "riot_data_tiled"
+version = "0.1.0"
+dependencies = [
+ "miniz_oxide 0.8.9",
+ "riot_data_core",
+ "riot_sim",
+ "serde",
  "serde_json",
+]
+
+[[package]]
+name = "riot_data_tunables"
+version = "0.1.0"
+dependencies = [
+ "riot_data_core",
+ "riot_sim",
+ "ron",
+ "serde",
 ]
 
 [[package]]
