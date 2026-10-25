@@ -453,12 +453,14 @@ fn apply(w: &mut World, e: Event) {
                     flags: prop_flag::BUILDING,
                     build: add,
                 });
+                w.props_dirty = true;
             } else if let Some(pr) = w.props.get_mut(prop as usize) {
                 pr.build = pr.build.saturating_add(add);
                 if pr.build == 255 {
                     pr.flags &= !prop_flag::BUILDING;
                     // A finished barricade is wider.
                     pr.half = Vec2::new(0.5, 2.4);
+                    w.props_dirty = true;
                 }
             }
             let pos = w.people.pos(bi);

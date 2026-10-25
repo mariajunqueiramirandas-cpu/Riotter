@@ -173,6 +173,8 @@ pub struct BodyCtx<'a> {
     pub tun: &'a Tunables,
     pub obbs: &'a [Obb],
     pub grid: &'a ObstacleGrid,
+    pub veh_obbs: &'a [Obb],
+    pub veh_grid: &'a ObstacleGrid,
 }
 
 /// Run the whole body phase.
@@ -380,6 +382,12 @@ pub fn move_bodies(p: &mut People, s: &mut PhysScratch, events: &mut [Vec<Event>
                 }
                 for o in cx.grid.near(q) {
                     if let Some(corr) = cx.obbs[o as usize].push_out(q, r) {
+                        wall_push += corr.len();
+                        q += corr;
+                    }
+                }
+                for o in cx.veh_grid.near(q) {
+                    if let Some(corr) = cx.veh_obbs[o as usize].push_out(q, r) {
                         wall_push += corr.len();
                         q += corr;
                     }

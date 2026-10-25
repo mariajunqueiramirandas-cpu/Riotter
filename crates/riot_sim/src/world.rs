@@ -30,6 +30,9 @@ use crate::tunables::Tunables;
 
 pub const MAX_OBJECTIVES: usize = OBJECTIVE_GOALS;
 /// Stable ids kept free for `DebugCommand::Spawn`.
+/// Most police vehicles a riot can field, as obstacles.
+pub const MAX_VEHICLE_OBSTACLES: usize = 256;
+
 pub const DEBUG_RESERVE: usize = 1024;
 pub const NO_SLOT: u32 = u32::MAX;
 
@@ -238,8 +241,14 @@ pub struct World {
     pub fields: Fields,
     pub flow: FlowSystem,
     pub phys: PhysScratch,
+    /// Props as obstacles, rebuilt only when a prop changes.
     pub obst: ObstacleGrid,
     pub obbs: Vec<Obb>,
+    /// A prop was built, grew or was destroyed since `obst` was built.
+    pub props_dirty: bool,
+    /// Police vehicles as obstacles, rebuilt every tick (they move).
+    pub veh_obst: ObstacleGrid,
+    pub veh_obbs: Vec<Obb>,
     pub props: Vec<Prop>,
     /// Per-chunk event buffers (DESIGN §11.3).
     pub events: Vec<Vec<Event>>,
@@ -436,6 +445,9 @@ impl World {
             phys: PhysScratch::new(cap),
             obst: ObstacleGrid::new(map.size, max_obst),
             obbs: Vec::with_capacity(max_obst),
+            props_dirty: true,
+            veh_obst: ObstacleGrid::new(map.size, MAX_VEHICLE_OBSTACLES),
+            veh_obbs: Vec::with_capacity(MAX_VEHICLE_OBSTACLES),
             props: Vec::with_capacity(setup.limits.props as usize),
             events: (0..chunks).map(|_| Vec::with_capacity(4096)).collect(),
             objectives: [Objective::default(); MAX_OBJECTIVES],
@@ -960,20 +972,27 @@ impl World {
     // Phase 7
 
     fn move_bodies(&mut self) {
-        self.obbs.clear();
-        for (k, pr) in self.props.iter().enumerate() {
-            if pr.flags & prop_flag::DESTROYED == 0 && self.obbs.len() < self.obbs.capacity() {
-                self.obbs.push(Obb {
-                    c: pr.pos,
-                    ax: pr.ax,
-                    half: pr.half,
-                    kind: 0,
-                    id: k as u16,
-                });
+        // Props stand still: their grid follows the props, not the clock, so
+        // a city full of parked cars costs nothing per tick.
+        if self.props_dirty {
+            self.obbs.clear();
+            for (k, pr) in self.props.iter().enumerate() {
+                if pr.flags & prop_flag::DESTROYED == 0 && self.obbs.len() < self.obbs.capacity() {
+                    self.obbs.push(Obb {
+                        c: pr.pos,
+                        ax: pr.ax,
+                        half: pr.half,
+                        kind: 0,
+                        id: k as u16,
+                    });
+                }
             }
+            self.obst.rebuild(&self.obbs);
+            self.props_dirty = false;
         }
-        self.police.vehicle_obbs(&mut self.obbs);
-        self.obst.rebuild(&self.obbs);
+        self.veh_obbs.clear();
+        self.police.vehicle_obbs(&mut self.veh_obbs);
+        self.veh_obst.rebuild(&self.veh_obbs);
         for e in &mut self.events {
             e.clear();
         }
@@ -984,6 +1003,8 @@ impl World {
             tun: &self.tun,
             obbs: &self.obbs,
             grid: &self.obst,
+            veh_obbs: &self.veh_obbs,
+            veh_grid: &self.veh_obst,
         };
         crate::physics::move_bodies(&mut self.people, &mut self.phys, &mut self.events, &cx);
     }

@@ -756,25 +756,34 @@ impl Probe {
     const EMPTY: u32 = u32::MAX;
     const SLOW: u32 = u32::MAX - 1;
 
-    #[inline]
+    /// Inlined everywhere: absorb reads seven layers through one probe, and
+    /// the shared offset arithmetic folds away.
+    #[inline(always)]
     fn corners(&self, f: &Fields, l: Layer) -> [f32; 4] {
-        match self.slot {
-            Probe::EMPTY => [0.0; 4],
-            Probe::SLOW => [
-                f.cell_value(l, self.x0, self.y0),
-                f.cell_value(l, self.x0 + 1, self.y0),
-                f.cell_value(l, self.x0, self.y0 + 1),
-                f.cell_value(l, self.x0 + 1, self.y0 + 1),
-            ],
-            s => {
-                let b = (s as usize * LAYERS + l as usize) * CL + self.cell as usize;
-                let d = &f.data[b..b + CC + 2];
-                [d[0], d[1], d[CC], d[CC + 1]]
-            }
+        if self.slot < Probe::SLOW {
+            let b = (self.slot as usize * LAYERS + l as usize) * CL + self.cell as usize;
+            let d = &f.data[b..b + CC + 2];
+            [d[0], d[1], d[CC], d[CC + 1]]
+        } else if self.slot == Probe::SLOW {
+            self.slow_corners(f, l)
+        } else {
+            [0.0; 4]
         }
     }
 
-    #[inline]
+    /// The four cells straddle chunks: rare, kept out of line.
+    #[cold]
+    #[inline(never)]
+    fn slow_corners(&self, f: &Fields, l: Layer) -> [f32; 4] {
+        [
+            f.cell_value(l, self.x0, self.y0),
+            f.cell_value(l, self.x0 + 1, self.y0),
+            f.cell_value(l, self.x0, self.y0 + 1),
+            f.cell_value(l, self.x0 + 1, self.y0 + 1),
+        ]
+    }
+
+    #[inline(always)]
     pub fn get(&self, f: &Fields, l: Layer) -> f32 {
         if self.slot == Probe::EMPTY {
             return 0.0;

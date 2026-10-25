@@ -353,6 +353,9 @@ fn fire(w: &mut World, tick: u32) {
         let pr = &mut w.props[k];
         pr.health = pr.health.saturating_sub(if f > 0.1 { 1 } else { 0 });
         if pr.health == 0 {
+            if pr.flags & prop_flag::DESTROYED == 0 {
+                w.props_dirty = true;
+            }
             pr.flags = (pr.flags | prop_flag::DESTROYED) & !prop_flag::BURNING;
         } else if f <= 0.0 && tick.is_multiple_of(20) {
             pr.flags &= !prop_flag::BURNING;
