@@ -951,7 +951,7 @@ mod tests {
                 ("things", ThingAtlas::layout().paint(level).img),
             ] {
                 let mut bytes = img.bytes();
-                for p in bytes.chunks_exact_mut(4) {
+                for p in bytes.as_chunks_mut::<4>().0 {
                     if p[3] == 0 {
                         p.copy_from_slice(&[96, 104, 96, 255]);
                     }

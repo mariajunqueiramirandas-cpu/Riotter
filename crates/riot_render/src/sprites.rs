@@ -1203,7 +1203,7 @@ mod tests {
     fn weights_are_premultiplied() {
         for level in 0..art::LEVELS {
             let atlas = build_atlas(level);
-            for px in atlas.rgba.chunks_exact(4) {
+            for px in atlas.rgba.as_chunks::<4>().0 {
                 let sum = px[0] as u32 + px[1] as u32 + px[2] as u32;
                 assert!(sum <= px[3] as u32 + 1);
             }
@@ -1220,7 +1220,7 @@ mod tests {
         for level in 0..art::LEVELS {
             let atlas = build_atlas(level);
             let mut bytes = atlas.rgba.clone();
-            for px in bytes.chunks_exact_mut(4) {
+            for px in bytes.as_chunks_mut::<4>().0 {
                 let k = 255 - px[3] as u32;
                 for c in 0..3 {
                     px[c] = (px[c] as u32 + 90 * k / 255) as u8;

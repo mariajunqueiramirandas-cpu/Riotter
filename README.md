@@ -17,7 +17,7 @@ vehicles and props as sprites, all generated at start-up (see
 
 ## Quick start
 
-Rust 1.88 or newer. Release builds target x86-64-v3 (AVX2), see
+Rust 1.99 or newer. Release builds target x86-64-v3 (AVX2), see
 [Build configuration](#build-configuration).
 
 ```sh
