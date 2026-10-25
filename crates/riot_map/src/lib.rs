@@ -272,10 +272,16 @@ impl Map {
         };
 
         // --- rasterize per tile row, in parallel
+        /// A tile row: `kinds` holds OPEN, BLOCKED or MIXED_HERE; the mixed
+        /// tiles' wall ranges and label indices point into the row's own
+        /// `walls` and `labels` until the rows are joined.
         struct RowOut {
             kinds: Vec<u32>,
-            mixed: Vec<(MixedTile, [Vec<u32>; 4], Option<[u8; 256]>)>,
+            mixed: Vec<MixedTile>,
+            walls: Vec<u32>,
+            labels: Vec<[u8; 256]>,
         }
+        const MIXED_HERE: u32 = u32::MAX - 2;
         let rows: Vec<RowOut> = (0..tdim)
             .into_par_iter()
             .map(|ty| {
@@ -316,6 +322,8 @@ impl Map {
                 let mut out = RowOut {
                     kinds: Vec::with_capacity(tdim as usize),
                     mixed: Vec::new(),
+                    walls: Vec::new(),
+                    labels: Vec::new(),
                 };
                 for tx in 0..tdim {
                     let tile_segs = segs_of((ty << tshift) | tx);
@@ -412,60 +420,66 @@ impl Map {
                         continue;
                     }
                     // Wall lists per 4 m sub-cell.
-                    let mut lists: [Vec<u32>; 4] = Default::default();
-                    for (q, list) in lists.iter_mut().enumerate() {
+                    let mut walls = [[0u32; 2]; 4];
+                    for (q, range) in walls.iter_mut().enumerate() {
                         let bmin = Vec2::new(x0 + (q & 1) as f32 * 4.0, y0 + (q >> 1) as f32 * 4.0);
                         let bmax = bmin + Vec2::new(4.0, 4.0);
+                        range[0] = out.walls.len() as u32;
                         for &s in tile_segs {
                             let seg = &segs[s as usize];
                             if seg_box_near(seg, bmin, bmax, margin) {
-                                list.push(s);
+                                out.walls.push(s);
                             }
                         }
+                        range[1] = out.walls.len() as u32;
                     }
                     let (ncomp, labels) = components(&mut bits);
-                    out.kinds.push(u32::MAX - 2); // patched below
-                    out.mixed.push((
-                        MixedTile {
-                            bits,
-                            walls: [[0; 2]; 4],
-                            labels: NO_LABELS,
-                            ncomp,
-                            rc: [NO_RC; MAX_COMP],
-                            links: [0; 4],
-                        },
-                        lists,
+                    let labels = labels.map_or(NO_LABELS, |l| {
+                        out.labels.push(l);
+                        out.labels.len() as u32 - 1
+                    });
+                    out.kinds.push(MIXED_HERE);
+                    out.mixed.push(MixedTile {
+                        bits,
+                        walls,
                         labels,
-                    ));
+                        ncomp,
+                        rc: [NO_RC; MAX_COMP],
+                        links: [0; 4],
+                    });
                 }
                 out
             })
             .collect();
 
+        // Join the rows in order: the arrays come out as if built tile by tile.
         let mut tiles = Vec::with_capacity((tdim * tdim) as usize);
-        let mut mixed = Vec::new();
-        let mut labels = Vec::new();
-        let mut wall_idx = Vec::new();
+        let mut mixed = Vec::with_capacity(rows.iter().map(|r| r.mixed.len()).sum());
+        let mut labels = Vec::with_capacity(rows.iter().map(|r| r.labels.len()).sum());
+        let mut wall_idx = Vec::with_capacity(rows.iter().map(|r| r.walls.len()).sum());
         for row in rows {
-            let mut m = row.mixed.into_iter();
+            let (w0, l0) = (wall_idx.len() as u32, labels.len() as u32);
+            let mut m = mixed.len() as u32;
             for k in row.kinds {
-                if k == u32::MAX - 2 {
-                    let (mut mt, lists, lab) = m.next().unwrap();
-                    for (q, list) in lists.iter().enumerate() {
-                        let s = wall_idx.len() as u32;
-                        wall_idx.extend_from_slice(list);
-                        mt.walls[q] = [s, wall_idx.len() as u32];
-                    }
-                    if let Some(l) = lab {
-                        mt.labels = labels.len() as u32;
-                        labels.push(l);
-                    }
-                    tiles.push(mixed.len() as u32);
-                    mixed.push(mt);
+                if k == MIXED_HERE {
+                    tiles.push(m);
+                    m += 1;
                 } else {
                     tiles.push(k);
                 }
             }
+            mixed.extend(row.mixed.into_iter().map(|mut mt| {
+                for range in &mut mt.walls {
+                    range[0] += w0;
+                    range[1] += w0;
+                }
+                if mt.labels != NO_LABELS {
+                    mt.labels += l0;
+                }
+                mt
+            }));
+            wall_idx.extend_from_slice(&row.walls);
+            labels.extend_from_slice(&row.labels);
         }
 
         let mut map = Map {
