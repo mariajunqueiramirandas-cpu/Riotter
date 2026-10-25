@@ -255,6 +255,7 @@ impl Canvas {
     ) {
         let (ox, oy) = self.origin(f);
         let (lo, hi) = shape.bounds();
+        let shape = shape.prepare();
         let half = CELL_M * 0.5;
         let to_px = |m: f32| (m + half) * self.ppm;
         let x0 = (to_px(lo[0]) - grow_px - 2.0).floor().max(0.0) as usize;
