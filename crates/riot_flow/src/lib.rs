@@ -1500,59 +1500,77 @@ struct JobBuf {
     heap: SmallHeap,
 }
 
-/// A small fixed-capacity binary min-heap, so tile builds never allocate.
+/// Entries of a [`SmallHeap`]: a push into a full heap is dropped.
+const HEAP_CAP: usize = 4096;
+
+/// A small fixed-capacity min-heap of `(cost, cell)`, so tile builds never
+/// allocate. Four children per node, and each entry packed into one `u64`,
+/// `cost << 16 | cell`, which orders like the pair. Keys are distinct (a
+/// cell is queued again only with a lower time), and any exact priority
+/// queue pops distinct keys in the same order, so the heap's shape does not
+/// change the marching.
 struct SmallHeap {
-    items: [(u32, u16); 4096],
+    items: [u64; HEAP_CAP],
     len: usize,
 }
 
 impl SmallHeap {
     fn new() -> Self {
         SmallHeap {
-            items: [(0, 0); 4096],
+            items: [0; HEAP_CAP],
             len: 0,
         }
     }
+
+    #[inline]
     fn push(&mut self, cost: u32, cell: u16) {
-        if self.len == self.items.len() {
+        if self.len == HEAP_CAP {
             return;
         }
+        let key = ((cost as u64) << 16) | cell as u64;
         let mut i = self.len;
-        self.items[i] = (cost, cell);
         self.len += 1;
         while i > 0 {
-            let p = (i - 1) / 2;
-            if self.items[p] <= self.items[i] {
+            let p = (i - 1) / 4;
+            if self.items[p] <= key {
                 break;
             }
-            self.items.swap(p, i);
+            self.items[i] = self.items[p];
             i = p;
         }
+        self.items[i] = key;
     }
+
+    #[inline]
     fn pop(&mut self) -> Option<(u32, u16)> {
         if self.len == 0 {
             return None;
         }
         let top = self.items[0];
         self.len -= 1;
-        self.items[0] = self.items[self.len];
+        let n = self.len;
+        let items = &mut self.items[..=n];
+        let key = items[n];
         let mut i = 0;
         loop {
-            let (l, r) = (2 * i + 1, 2 * i + 2);
-            let mut m = i;
-            if l < self.len && self.items[l] < self.items[m] {
-                m = l;
-            }
-            if r < self.len && self.items[r] < self.items[m] {
-                m = r;
-            }
-            if m == i {
+            let c = 4 * i + 1;
+            if c >= n {
                 break;
             }
-            self.items.swap(m, i);
+            let mut m = c;
+            for k in c + 1..(c + 4).min(n) {
+                if items[k] < items[m] {
+                    m = k;
+                }
+            }
+            if items[m] >= key {
+                break;
+            }
+            items[i] = items[m];
             i = m;
         }
-        Some(top)
+        items[i] = key;
+        Some(((top >> 16) as u32, top as u16))
     }
 }
 
@@ -2537,5 +2555,36 @@ mod tests {
             recs.clear();
             assert!(recs.as_slice().is_empty());
         }
+    }
+
+    #[test]
+    fn small_heap_pops_in_key_order() {
+        // Against a sorted reference, including pushes into a full heap,
+        // which are dropped.
+        let mut heap = SmallHeap::new();
+        let mut reference: Vec<(u32, u16)> = Vec::new();
+        let mut x = 1u64;
+        for round in 0..20_000u32 {
+            x = riot_core::rng::mix(x);
+            if !x.is_multiple_of(3) || reference.is_empty() {
+                let key = (
+                    (x >> 8) as u32 % (if round % 2 == 0 { 50 } else { 1 << 30 }),
+                    (x >> 40) as u16,
+                );
+                heap.push(key.0, key.1);
+                if reference.len() < HEAP_CAP {
+                    reference.push(key);
+                }
+            } else {
+                reference.sort_unstable();
+                assert_eq!(heap.pop(), Some(reference.remove(0)));
+            }
+            assert_eq!(heap.len, reference.len());
+        }
+        reference.sort_unstable();
+        for k in reference {
+            assert_eq!(heap.pop(), Some(k));
+        }
+        assert_eq!(heap.pop(), None);
     }
 }
