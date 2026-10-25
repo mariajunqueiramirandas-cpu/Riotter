@@ -246,13 +246,22 @@ pub fn move_bodies(p: &mut People, s: &mut PhysScratch, events: &mut [Vec<Event>
                 let start = Vec2::new(x0[i], y0[i]);
                 let mut q = Vec2::new(px[k], py[k]);
                 let mut wall_push = 0.0f32;
-                for _ in 0..2 {
-                    for &sg in cx.map.walls_near(q) {
+                // The walls near the predicted position, kept for the tunnel
+                // test below while `q` stays there.
+                let (q0, near0) = (q, cx.map.walls_near(q));
+                let mut near = near0;
+                for pass in 0..2 {
+                    if pass == 1 {
+                        near = cx.map.walls_near(q);
+                    }
+                    let mut touched = false;
+                    for &sg in near {
                         let (sa, sb) = cx.map.segment(sg);
                         let cp = closest_on_segment(q, sa, sb);
                         let d = q - cp;
                         let d2 = d.len2();
                         if d2 < r * r {
+                            touched = true;
                             let dist = d2.sqrt();
                             let n = if dist > 1e-6 {
                                 d * (1.0 / dist)
@@ -262,6 +271,11 @@ pub fn move_bodies(p: &mut People, s: &mut PhysScratch, events: &mut [Vec<Event>
                             q += n * (r - dist);
                             wall_push += r - dist;
                         }
+                    }
+                    // A pass that touched no wall left `q` as it was: the
+                    // second would repeat it exactly.
+                    if !touched {
+                        break;
                     }
                 }
                 let officer = Archetype::from_u8(stat[k][stat::ARCH]).is_officer();
@@ -282,14 +296,20 @@ pub fn move_bodies(p: &mut People, s: &mut PhysScratch, events: &mut [Vec<Event>
                     }
                 }
                 // Never tunnel through a wall: undo a move that crossed one.
+                // Not moving crosses nothing (`segment_hit` of a zero-length
+                // move is `None`), and a sub-cell's list is tested once when
+                // both ends are in it.
                 let mut crossed = false;
-                for list in [cx.map.walls_near(start), cx.map.walls_near(q)] {
-                    for &sg in list {
+                if q != start {
+                    let (l0, l1) = (
+                        cx.map.walls_near(start),
+                        if q == q0 { near0 } else { cx.map.walls_near(q) },
+                    );
+                    let l1 = if core::ptr::eq(l0, l1) { &[][..] } else { l1 };
+                    crossed = l0.iter().chain(l1).any(|&sg| {
                         let (sa, sb) = cx.map.segment(sg);
-                        if segment_hit(start, q, sa, sb).is_some() {
-                            crossed = true;
-                        }
-                    }
+                        segment_hit(start, q, sa, sb).is_some()
+                    });
                 }
                 if crossed {
                     q = start;
