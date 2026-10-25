@@ -33,7 +33,7 @@ use riot_fields::{Fields, Layer, field_cell_of};
 use riot_people::{Cold, People};
 use riot_spatial::Spatial;
 use riot_world::World;
-use riot_world::minds::{INPUTS, Minds, due};
+use riot_world::minds::{Batch, INPUTS, Minds, due};
 use riot_world::police::Police;
 
 struct ThinkCtx<'a> {
@@ -72,6 +72,7 @@ pub fn think(w: &mut World) {
     let wake_k = w.tun.wake_interval.max(k as f32) as u32;
     let late = narrow_u8(w.tick as f32 / w.setup.duration.max(1) as f32);
     w.stat_scratch[..span].copy_from_slice(&w.people.stat[..span]);
+    let mut batches = std::mem::take(&mut w.minds.batches);
     let People {
         pos_x,
         pos_y,
@@ -112,8 +113,9 @@ pub fn think(w: &mut World) {
         .par_chunks_mut(CHUNK_AGENTS)
         .zip(aux[..span].par_chunks_mut(CHUNK_AGENTS))
         .zip(intent[..span].par_chunks(CHUNK_AGENTS))
+        .zip(batches[..chunks].par_iter_mut())
         .enumerate()
-        .map(|(c, ((ss, ax), is))| {
+        .map(|(c, (((ss, ax), is), batch))| {
             let base = c * CHUNK_AGENTS;
             think_chunk(
                 &cx,
@@ -123,10 +125,12 @@ pub fn think(w: &mut World) {
                 ax,
                 is,
                 &cx.stable[base..base + CHUNK_AGENTS],
+                batch,
             )
         })
         .sum();
     w.minds.thought += thought;
+    w.minds.batches = batches;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -138,11 +142,21 @@ fn think_chunk(
     ax: &mut [u32],
     is: &[u16],
     ids: &[u32],
+    scratch: &mut Batch,
 ) -> u64 {
+    let Batch {
+        civ: batch,
+        officers,
+        inputs,
+        noise,
+        score,
+        best,
+        best_s,
+        second,
+        second_s,
+    } = scratch;
     // Gather the batch.
-    let mut batch = [0u16; CHUNK_AGENTS];
     let mut n = 0usize;
-    let mut officers = [0u16; CHUNK_AGENTS];
     let mut no = 0usize;
     for k in 0..ss.len() {
         let i = base + k;
@@ -189,7 +203,6 @@ fn think_chunk(
     }
 
     // Inputs (SoA over the batch).
-    let mut inputs = [[0u8; CHUNK_AGENTS]; INPUTS];
     for b in 0..n {
         let k = batch[b] as usize;
         let i = base + k;
@@ -257,7 +270,8 @@ fn think_chunk(
         let chant_asked = a == Archetype::Organizer && cx.chanting.contains(&ids[k]);
         let hp = st[stat::HEALTH];
         let inj_near = cx.fields.sample(Layer::Injured, pos.x, pos.y);
-        let row = [
+        // Typed so that every input row of the batch is written.
+        let row: [u8; INPUTS] = [
             e[emo::FEAR],
             anger_in,
             e[emo::MORALE],
@@ -283,16 +297,14 @@ fn think_chunk(
         }
     }
 
-    let mut noise = [0u64; CHUNK_AGENTS];
     for b in 0..n {
         noise[b] = roll(cx.seed, cx.tick, ids[batch[b] as usize], Stream::Think);
     }
     // Score, one action at a time across the batch.
-    let mut best = [0u8; CHUNK_AGENTS];
-    let mut best_s = [f32::NEG_INFINITY; CHUNK_AGENTS];
-    let mut second = [0u8; CHUNK_AGENTS];
-    let mut second_s = [f32::NEG_INFINITY; CHUNK_AGENTS];
-    let mut score = [0.0f32; CHUNK_AGENTS];
+    best[..n].fill(0);
+    best_s[..n].fill(f32::NEG_INFINITY);
+    second[..n].fill(0);
+    second_s[..n].fill(f32::NEG_INFINITY);
     for act in 0..CIVILIAN_ACTIONS {
         for b in 0..n {
             let a = ss[batch[b] as usize][stat::ARCH] as usize;

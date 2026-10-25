@@ -3,6 +3,7 @@
 //! action weights, built once at riot start. Thinking with them is
 //! `riot_think`.
 
+use riot_core::lanes::CHUNK_AGENTS;
 use riot_core::mix;
 
 use riot_defs::archetype::ARCHETYPES;
@@ -217,6 +218,24 @@ const WEIGHTS: [[f32; CIVILIAN_ACTIONS]; ARCHETYPES] = [
 
 const MAX_CONS: usize = 6;
 
+/// One parallel chunk's batch of minds while they think. Nothing in it
+/// lasts beyond the chunk's turn: thinking writes `[..n]` of each array for
+/// the `n` agents it gathers before reading it.
+#[derive(Clone)]
+pub struct Batch {
+    /// Local indices of the civilians and the officers who think.
+    pub civ: [u16; CHUNK_AGENTS],
+    pub officers: [u16; CHUNK_AGENTS],
+    /// Inputs, `[input][agent]`.
+    pub inputs: [[u8; CHUNK_AGENTS]; INPUTS],
+    pub noise: [u64; CHUNK_AGENTS],
+    pub score: [f32; CHUNK_AGENTS],
+    pub best: [u8; CHUNK_AGENTS],
+    pub best_s: [f32; CHUNK_AGENTS],
+    pub second: [u8; CHUNK_AGENTS],
+    pub second_s: [f32; CHUNK_AGENTS],
+}
+
 /// Lookup tables and weights, built once at riot start.
 pub struct Minds {
     /// `[action][consideration] → (input, table)`.
@@ -225,10 +244,13 @@ pub struct Minds {
     pub lut_n: Vec<u8>,
     pub weights: [[f32; CIVILIAN_ACTIONS]; ARCHETYPES],
     pub thought: u64,
+    /// A [`Batch`] per parallel chunk, so thinking neither allocates nor
+    /// clears 23 KB of stack per chunk and tick.
+    pub batches: Vec<Batch>,
 }
 
 impl Minds {
-    pub fn new(_cap: usize, tun: &Tunables) -> Self {
+    pub fn new(cap: usize, tun: &Tunables) -> Self {
         let mut luts = Vec::with_capacity(CIVILIAN_ACTIONS);
         let mut lut_input = Vec::with_capacity(CIVILIAN_ACTIONS);
         let mut lut_n = Vec::with_capacity(CIVILIAN_ACTIONS);
@@ -250,6 +272,20 @@ impl Minds {
             lut_n,
             weights: WEIGHTS,
             thought: 0,
+            batches: vec![
+                Batch {
+                    civ: [0; CHUNK_AGENTS],
+                    officers: [0; CHUNK_AGENTS],
+                    inputs: [[0; CHUNK_AGENTS]; INPUTS],
+                    noise: [0; CHUNK_AGENTS],
+                    score: [0.0; CHUNK_AGENTS],
+                    best: [0; CHUNK_AGENTS],
+                    best_s: [0.0; CHUNK_AGENTS],
+                    second: [0; CHUNK_AGENTS],
+                    second_s: [0.0; CHUNK_AGENTS],
+                };
+                cap.div_ceil(CHUNK_AGENTS)
+            ],
         };
         m.retune(tun);
         m
