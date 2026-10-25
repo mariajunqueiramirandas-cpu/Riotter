@@ -608,42 +608,71 @@ impl Map {
         }
     }
 
+    /// Component of each cell along one side of a tile (0 +x, 1 -x, 2 +y,
+    /// 3 -y), in order along the side, `NO_RC` where not walkable: the
+    /// `comp_of` of those cells.
+    fn border_comps(&self, t: u32, side: usize) -> [u8; TILE as usize] {
+        let m = match self.tiles[t as usize] {
+            OPEN => return [0; TILE as usize],
+            BLOCKED => return [NO_RC; TILE as usize],
+            m => &self.mixed[m as usize],
+        };
+        let labels = (m.labels != NO_LABELS).then(|| &self.labels[m.labels as usize]);
+        std::array::from_fn(|k| {
+            let k = k as u32;
+            let bit = match side {
+                0 => k * 16 + 15,
+                1 => k * 16,
+                2 => 15 * 16 + k,
+                _ => k,
+            };
+            if !m.walkable(bit) {
+                NO_RC
+            } else {
+                labels.map_or(0, |l| l[bit as usize])
+            }
+        })
+    }
+
+    /// Links of every mixed tile across its four borders, in parallel per
+    /// tile row: each depends only on the bits and labels of the tile and its
+    /// neighbours.
     fn build_links(&mut self) {
-        let mut out: Vec<(usize, [u16; 4])> = Vec::with_capacity(self.mixed.len());
-        for t in 0..self.tiles.len() as u32 {
-            let m = self.tiles[t as usize];
-            if m == OPEN || m == BLOCKED {
-                continue;
-            }
-            let (tx, ty) = (t & (self.tdim - 1), t >> self.tshift);
-            let mut links = [0u16; 4];
-            for (dir, l) in links.iter_mut().enumerate() {
-                if self.neighbour_tile(t, dir).is_none() {
-                    continue;
-                }
-                for k in 0..TILE {
-                    let (a, b) = match dir {
-                        0 => (
-                            (tx * TILE + 15, ty * TILE + k),
-                            ((tx + 1) * TILE, ty * TILE + k),
-                        ),
-                        1 => ((tx * TILE, ty * TILE + k), (tx * TILE - 1, ty * TILE + k)),
-                        2 => (
-                            (tx * TILE + k, ty * TILE + 15),
-                            (tx * TILE + k, (ty + 1) * TILE),
-                        ),
-                        _ => ((tx * TILE + k, ty * TILE), (tx * TILE + k, ty * TILE - 1)),
-                    };
-                    if let (Some(ca), Some(cb)) = (self.comp_of(a.0, a.1), self.comp_of(b.0, b.1)) {
-                        *l |= 1 << (ca * 4 + cb);
+        let this = &*self;
+        let rows: Vec<Vec<[u16; 4]>> = (0..this.tdim)
+            .into_par_iter()
+            .map(|ty| {
+                let mut out = Vec::new();
+                for tx in 0..this.tdim {
+                    let t = this.tile_index(tx, ty);
+                    let m = this.tiles[t as usize];
+                    if m == OPEN || m == BLOCKED {
+                        continue;
                     }
+                    let mut links = [0u16; 4];
+                    for (dir, l) in links.iter_mut().enumerate() {
+                        let Some(nt) = this.neighbour_tile(t, dir) else {
+                            continue;
+                        };
+                        // The cells facing each other across the border.
+                        let (a, b) = (this.border_comps(t, dir), this.border_comps(nt, dir ^ 1));
+                        for (&ca, &cb) in a.iter().zip(&b) {
+                            if ca != NO_RC && cb != NO_RC {
+                                *l |= 1 << (ca * 4 + cb);
+                            }
+                        }
+                    }
+                    out.push(links);
                 }
-            }
-            out.push((m as usize, links));
+                out
+            })
+            .collect();
+        // Mixed tiles are numbered in tile order, as the rows are.
+        let mut mixed = self.mixed.iter_mut();
+        for links in rows.into_iter().flatten() {
+            mixed.next().expect("one link set per mixed tile").links = links;
         }
-        for (m, links) in out {
-            self.mixed[m].links = links;
-        }
+        debug_assert!(mixed.next().is_none());
     }
 
     /// Wall segments near a point: the list of the 4 m sub-cell containing it.
