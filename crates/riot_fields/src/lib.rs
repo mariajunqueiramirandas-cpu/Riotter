@@ -70,6 +70,9 @@ pub const LAYERS: usize = 14;
 /// Layers one fused blur pass can carry.
 pub const FUSED: usize = 3;
 
+/// A layer of zeros.
+static ZEROS: [f32; CL] = [0.0; CL];
+
 /// A layer's bit in the per-slot layer masks.
 #[inline(always)]
 const fn bit(l: Layer) -> u16 {
@@ -179,6 +182,9 @@ pub struct Fields {
     /// Per slot (and fused layer) of `tmp`, bit `y`: row `y` of the row pass
     /// read a tiny value, so the column pass takes f64 products near it.
     tmp_tiny: Vec<u64>,
+    /// Per slot of `tmp`, bit `j` (fused layer `j`): the row pass was all
+    /// +0.0 and is not written; read zeros instead.
+    tmp_zero: Vec<u8>,
     /// Message layer (DESIGN §13), `fidelity << 8 | id`, and its scratch.
     pub msg: Vec<u16>,
     pub msg_tmp: Vec<u16>,
@@ -225,6 +231,7 @@ impl Fields {
             data: vec![0.0; pool * LAYERS * CL],
             tmp: vec![0.0; pool * FUSED * CL],
             tmp_tiny: vec![0; pool * FUSED],
+            tmp_zero: vec![0; pool],
             msg: vec![0; pool * CL],
             msg_tmp: vec![0; pool * CL],
             idle: vec![0; pool],
@@ -616,8 +623,18 @@ impl Fields {
         // Rows near tiny values take exact f64 products (see `mul_w`).
         let all_wide = tiny_weight(&kx) || tiny_weight(&ky) || tiny_weight(&[decay]);
         let (kxw, kyw, decay_w) = (kx.map(wide), ky.map(wide), wide(decay));
+        // What the passes make of +0.0. Where that is +0.0 again (unless a
+        // weight is negative or NaN), a chunk whose rows read only +0.0
+        // layers gets a row pass of +0.0, which is not written (`tmp_zero`
+        // stands for it), and one whose columns read only such rows keeps
+        // its layer of +0.0 (masked by `Open`, never negative: +0.0).
+        let zrow = kx[0] * 0.0 + kx[1] * 0.0 + kx[2] * 0.0 + kx[3] * 0.0 + kx[4] * 0.0;
+        let zcol =
+            decay * (ky[0] * zrow + ky[1] * zrow + ky[2] * zrow + ky[3] * zrow + ky[4] * zrow);
+        let sparse = zrow.to_bits() == 0 && zcol.to_bits() == 0;
+        let lb = bit(l);
         {
-            let data = &self.data;
+            let (data, live) = (&self.data, &self.live);
             let table = &self.table;
             let slot_chunk = &self.slot_chunk;
             let cdim = self.cdim;
@@ -625,8 +642,9 @@ impl Fields {
             self.tmp[..pool * CL]
                 .par_chunks_mut(CL)
                 .zip(self.tmp_tiny[..pool].par_iter_mut())
+                .zip(self.tmp_zero[..pool].par_iter_mut())
                 .enumerate()
-                .for_each(|(slot, (out, tiny))| {
+                .for_each(|(slot, ((out, tiny), zero))| {
                     let c = slot_chunk[slot];
                     if c == NO_CHUNK {
                         return;
@@ -640,9 +658,19 @@ impl Fields {
                         let s = table[(cy * cdim + x as u32) as usize];
                         if s == NO_SLOT { None } else { Some(s as usize) }
                     };
+                    let (left, right) = (nb(-1), nb(1));
+                    let clear = |s: usize| live[s] & lb == 0;
+                    *zero = (sparse
+                        && clear(slot)
+                        && left.is_none_or(clear)
+                        && right.is_none_or(clear)) as u8;
+                    if *zero != 0 {
+                        *tiny = 0;
+                        return;
+                    }
                     let me = rows(&data[(slot * LAYERS + li) * CL..][..CL]);
-                    let left = nb(-1).map(|s| rows(&data[(s * LAYERS + li) * CL..][..CL]));
-                    let right = nb(1).map(|s| rows(&data[(s * LAYERS + li) * CL..][..CL]));
+                    let left = left.map(|s| rows(&data[(s * LAYERS + li) * CL..][..CL]));
+                    let right = right.map(|s| rows(&data[(s * LAYERS + li) * CL..][..CL]));
                     let out = rows_mut(out);
                     let mut row = [0.0f32; CC + 4];
                     let mut t = 0u64;
@@ -675,8 +703,7 @@ impl Fields {
                     *tiny = t;
                 });
         }
-        let tmp = &self.tmp;
-        let tmp_tiny = &self.tmp_tiny;
+        let (tmp, tmp_tiny, tmp_zero) = (&self.tmp, &self.tmp_tiny, &self.tmp_zero);
         let table = &self.table;
         let slot_chunk = &self.slot_chunk;
         let cdim = self.cdim;
@@ -698,8 +725,20 @@ impl Fields {
                     let s = table[(y as u32 * cdim + cx) as usize];
                     if s == NO_SLOT { None } else { Some(s as usize) }
                 };
-                let (up, down) = (nb(-1), nb(1));
-                let me = rows(&tmp[slot * CL..][..CL]);
+                // A row pass of +0.0 reads like a missing chunk.
+                let (up, down) = (
+                    nb(-1).filter(|&s| tmp_zero[s] == 0),
+                    nb(1).filter(|&s| tmp_zero[s] == 0),
+                );
+                if tmp_zero[slot] != 0 && up.is_none() && down.is_none() {
+                    debug_assert!(!any_bits(&d[li * CL..(li + 1) * CL]));
+                    return 0.0;
+                }
+                let me = rows(if tmp_zero[slot] != 0 {
+                    &ZEROS
+                } else {
+                    &tmp[slot * CL..][..CL]
+                });
                 let above = up.map(|s| rows(&tmp[s * CL..][..CL]));
                 let below = down.map(|s| rows(&tmp[s * CL..][..CL]));
                 // Tiny rows of the column window: bit `y + 2` is row `y`.
@@ -781,15 +820,20 @@ impl Fields {
         // Rows near tiny values take exact f64 products (see `mul_w`).
         let all_wide = tiny_weight(&[a, c]);
         let (aw, cw) = (wide(a), wide(c));
+        // What the passes make of +0.0: see `filter`.
+        let zrow = a * (0.0 + 0.0) + c * 0.0;
+        let sparse = zrow.to_bits() == 0 && (a * (zrow + zrow) + c * zrow).to_bits() == 0;
         let pool = self.pool;
         let cdim = self.cdim;
         {
-            let (data, table, slot_chunk) = (&self.data, &self.table, &self.slot_chunk);
+            let (data, live) = (&self.data, &self.live);
+            let (table, slot_chunk) = (&self.table, &self.slot_chunk);
             self.tmp[..pool * FUSED * CL]
                 .par_chunks_mut(FUSED * CL)
                 .zip(self.tmp_tiny.par_chunks_mut(FUSED))
+                .zip(self.tmp_zero.par_iter_mut())
                 .enumerate()
-                .for_each(|(slot, (out, tiny))| {
+                .for_each(|(slot, ((out, tiny), zero))| {
                     let ch = slot_chunk[slot];
                     if ch == NO_CHUNK {
                         return;
@@ -804,8 +848,19 @@ impl Fields {
                         (s != NO_SLOT).then_some(s as usize)
                     };
                     let (left, right) = (nb(-1), nb(1));
+                    *zero = 0;
                     for (j, &l) in layers.iter().enumerate() {
                         let li = l as usize;
+                        let clear = |s: usize| live[s] & bit(l) == 0;
+                        if sparse
+                            && clear(slot)
+                            && left.is_none_or(clear)
+                            && right.is_none_or(clear)
+                        {
+                            *zero |= 1 << j;
+                            tiny[j] = 0;
+                            continue;
+                        }
                         let me = rows(&data[(slot * LAYERS + li) * CL..][..CL]);
                         let left = left.map(|s| rows(&data[(s * LAYERS + li) * CL..][..CL]));
                         let right = right.map(|s| rows(&data[(s * LAYERS + li) * CL..][..CL]));
@@ -832,7 +887,7 @@ impl Fields {
                     }
                 });
         }
-        let (tmp, tmp_tiny) = (&self.tmp, &self.tmp_tiny);
+        let (tmp, tmp_tiny, tmp_zero) = (&self.tmp, &self.tmp_tiny, &self.tmp_zero);
         let (table, slot_chunk) = (&self.table, &self.slot_chunk);
         self.data
             .par_chunks_mut(LAYERS * CL)
@@ -852,10 +907,23 @@ impl Fields {
                     let s = table[(y as u32 * cdim + cx) as usize];
                     (s != NO_SLOT).then_some(s as usize)
                 };
-                let (up, down) = (nb(-1), nb(1));
                 let zero = [0.0f32; CC];
                 for (j, &l) in layers.iter().enumerate() {
-                    let me = rows(&tmp[(slot * FUSED + j) * CL..][..CL]);
+                    // A row pass of +0.0 reads like a missing chunk.
+                    let computed = |s: usize| tmp_zero[s] & 1 << j == 0;
+                    let (up, down) = (
+                        nb(-1).filter(|&s| computed(s)),
+                        nb(1).filter(|&s| computed(s)),
+                    );
+                    if !computed(slot) && up.is_none() && down.is_none() {
+                        debug_assert!(!any_bits(&d[l as usize * CL..(l as usize + 1) * CL]));
+                        continue;
+                    }
+                    let me = rows(if computed(slot) {
+                        &tmp[(slot * FUSED + j) * CL..][..CL]
+                    } else {
+                        &ZEROS
+                    });
                     let above =
                         up.map_or(&zero, |s| &rows(&tmp[(s * FUSED + j) * CL..][..CL])[CC - 1]);
                     let below =
@@ -1370,7 +1438,14 @@ fn react(
     let mut fatigue = widen_u8(e[emo::FATIGUE]);
     let mut harm = 0.0;
     let mut gas_harm = 0.0;
-    let sparse = |l: Layer| if live & bit(l) == 0 { 0.0 } else { get(l) };
+    let sparse = |l: Layer| {
+        if live & bit(l) == 0 {
+            debug_assert_eq!(get(l).to_bits(), 0);
+            0.0
+        } else {
+            get(l)
+        }
+    };
     let [w, threat, fear_field, anger_field] = dense;
     // Products of samples: exact f64 products when one is tiny (see
     // `mul_w`), which is rare enough to keep the f32 ones otherwise.
