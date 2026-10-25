@@ -1459,14 +1459,25 @@ fn tile_block(fields: &Fields, cx: f32, cy: f32) -> f32 {
     let (fx, fy) = fields.geom.to_cell_f(cx - TILE_M * 0.5, cy - TILE_M * 0.5);
     let (x0, y0) = ((fx + 0.5).floor() as i32, (fy + 0.5).floor() as i32);
     let cc = riot_fields::CC as i32;
-    match fields.slot_of_chunk(x0.div_euclid(cc), y0.div_euclid(cc)) {
-        Some(s) if fields.blocked[s] => {}
+    let s = match fields.slot_of_chunk(x0.div_euclid(cc), y0.div_euclid(cc)) {
+        Some(s) if fields.blocked[s] => s,
         _ => return 0.0,
-    }
+    };
     let mut m = 0.0f32;
-    for dy in 0..4 {
-        for dx in 0..4 {
-            m = m.max(fields.cell_value(Layer::Block, x0 + dx, y0 + dy));
+    let (lx, ly) = (x0.rem_euclid(cc), y0.rem_euclid(cc));
+    if lx + 3 < cc && ly + 3 < cc {
+        // All 16 cells are in this chunk, where `cell_value` would look.
+        let block = fields.layer(s, Layer::Block);
+        for dy in 0..4 {
+            for dx in 0..4 {
+                m = m.max(block[((ly + dy) * cc + lx + dx) as usize]);
+            }
+        }
+    } else {
+        for dy in 0..4 {
+            for dx in 0..4 {
+                m = m.max(fields.cell_value(Layer::Block, x0 + dx, y0 + dy));
+            }
         }
     }
     m
