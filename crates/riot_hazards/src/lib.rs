@@ -55,11 +55,7 @@ pub fn pin_emitters(w: &mut World) {
 /// Cameras: the layer counts the cameras that can see each cell, from
 /// filming journalists and phones (DESIGN §2.7). Every 10 ticks.
 pub fn stamp_cameras(w: &mut World) {
-    for slot in 0..w.fields.pool {
-        if w.fields.slot_chunk[slot] != NO_CHUNK {
-            w.fields.layer_mut(slot, Layer::Camera).fill(0.0);
-        }
-    }
+    w.fields.clear_layer(Layer::Camera);
     let r = w.tun.camera_radius;
     for i in 0..w.people.len {
         let st = w.people.stat[i];
@@ -153,10 +149,12 @@ fn fire(w: &mut World, tick: u32) {
     let mut any = false;
     for slot in 0..w.fields.pool {
         let c = w.fields.slot_chunk[slot];
-        if c == NO_CHUNK {
+        if c == NO_CHUNK || w.fields.is_zero(slot, Layer::Fire) {
             continue;
         }
         if !w.fields.layer(slot, Layer::Fire).iter().any(|&v| v > 0.0) {
+            // Burnt out: from now on the slot is skipped without a look.
+            w.fields.refresh_zero(slot, Layer::Fire);
             continue;
         }
         any = true;
