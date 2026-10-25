@@ -420,7 +420,7 @@ impl Map {
                             links: [0; 4],
                         },
                         lists,
-                        if ncomp > 1 { Some(labels) } else { None },
+                        labels,
                     ));
                 }
                 out
@@ -1074,64 +1074,74 @@ fn seg_box_dist2(a: Vec2, b: Vec2, bmin: Vec2, bmax: Vec2) -> f32 {
 }
 
 /// 4-connected components of a tile bitmap, capped at `MAX_COMP`; cells of
-/// further components are cleared. Returns the count and per-cell labels.
-fn components(bits: &mut [u64; 4]) -> (u8, [u8; 256]) {
-    let mut labels = [u8::MAX; 256];
-    let get = |bits: &[u64; 4], i: usize| (bits[i >> 6] >> (i & 63)) & 1 != 0;
-    let mut n = 0u8;
-    let mut stack = [0u16; 256];
-    for start in 0..256usize {
-        if !get(bits, start) || labels[start] != u8::MAX {
-            continue;
+/// further components are cleared. Components are numbered in the order of
+/// their first cell (row-major), as a flood fill started from each unlabelled
+/// cell in turn numbers them. Returns the count and, for 2+ components, the
+/// label of every cell (0 where not walkable).
+///
+/// Works on the runs of walkable cells along each row: runs in adjacent rows
+/// that share a column are connected. Union by minimum makes every root the
+/// component's first run, so roots in run order are components in the order
+/// of their first cell.
+fn components(bits: &mut [u64; 4]) -> (u8, Option<[u8; 256]>) {
+    // A 16-cell row has at most 8 runs.
+    const MAX_RUNS: usize = (TILE * TILE / 2) as usize;
+    fn find(p: &mut [u8; MAX_RUNS], mut x: u8) -> u8 {
+        while p[x as usize] != x {
+            p[x as usize] = p[p[x as usize] as usize];
+            x = p[x as usize];
         }
-        let label = n;
-        let keep = (n as usize) < MAX_COMP;
-        let mut sp = 0;
-        stack[sp] = start as u16;
-        sp += 1;
-        labels[start] = label;
-        while sp > 0 {
-            sp -= 1;
-            let c = stack[sp] as usize;
-            let (x, y) = (c & 15, c >> 4);
-            let mut push = |nc: usize, stack: &mut [u16; 256], sp: &mut usize| {
-                if get(bits, nc) && labels[nc] == u8::MAX {
-                    labels[nc] = label;
-                    stack[*sp] = nc as u16;
-                    *sp += 1;
+        x
+    }
+    let mut runs = [0u16; MAX_RUNS];
+    let mut run_row = [0u8; MAX_RUNS];
+    let mut parent = [0u8; MAX_RUNS];
+    let mut n = 0usize;
+    let mut prev = 0..0;
+    for ly in 0..TILE as usize {
+        let mut w = (bits[ly >> 2] >> ((ly & 3) * 16)) as u16;
+        let first = n;
+        while w != 0 {
+            // The run starting at the lowest set bit (the carry clears it).
+            let run = (w ^ w.wrapping_add(w.isolate_lowest_one())) & w;
+            w &= !run;
+            (runs[n], run_row[n], parent[n]) = (run, ly as u8, n as u8);
+            for j in prev.clone() {
+                if runs[j] & run != 0 {
+                    let (a, b) = (find(&mut parent, j as u8), find(&mut parent, n as u8));
+                    parent[a.max(b) as usize] = a.min(b);
                 }
-            };
-            if x > 0 {
-                push(c - 1, &mut stack, &mut sp);
             }
-            if x < 15 {
-                push(c + 1, &mut stack, &mut sp);
-            }
-            if y > 0 {
-                push(c - 16, &mut stack, &mut sp);
-            }
-            if y < 15 {
-                push(c + 16, &mut stack, &mut sp);
-            }
-        }
-        if keep {
             n += 1;
+        }
+        prev = first..n;
+    }
+    let mut comp = [0u8; MAX_RUNS];
+    let mut count = 0usize;
+    for r in 0..n {
+        let root = find(&mut parent, r as u8) as usize;
+        if root == r {
+            comp[r] = count.min(MAX_COMP) as u8;
+            count += 1;
         } else {
+            comp[r] = comp[root];
+        }
+    }
+    let ncomp = count.min(MAX_COMP);
+    let mut labels = [0u8; 256];
+    for r in 0..n {
+        let ly = run_row[r] as usize;
+        let c = comp[r];
+        if c as usize == MAX_COMP {
             // Too many pockets: drop this one.
-            for i in 0..256 {
-                if labels[i] == label {
-                    bits[i >> 6] &= !(1 << (i & 63));
-                    labels[i] = u8::MAX - 1;
-                }
-            }
+            bits[ly >> 2] &= !((runs[r] as u64) << ((ly & 3) * 16));
+        } else if c > 0 {
+            let lx = runs[r].trailing_zeros() as usize;
+            let len = runs[r].count_ones() as usize;
+            labels[ly * 16 + lx..][..len].fill(c);
         }
     }
-    for l in labels.iter_mut() {
-        if *l >= MAX_COMP as u8 {
-            *l = 0;
-        }
-    }
-    (n, labels)
+    (ncomp as u8, (ncomp > 1).then_some(labels))
 }
 
 #[cfg(test)]
@@ -1236,7 +1246,100 @@ mod tests {
         }
         let (n, labels) = components(&mut bits);
         assert_eq!(n, 4);
-        assert_eq!(labels[6], 3);
+        assert_eq!(labels.unwrap()[6], 3);
         assert_eq!(bits[0] & (1 << 8), 0);
+    }
+
+    /// The original flood fill, which `components` must agree with.
+    fn components_flood(bits: &mut [u64; 4]) -> (u8, [u8; 256]) {
+        let mut labels = [u8::MAX; 256];
+        let get = |bits: &[u64; 4], i: usize| (bits[i >> 6] >> (i & 63)) & 1 != 0;
+        let mut n = 0u8;
+        let mut stack = [0u16; 256];
+        for start in 0..256usize {
+            if !get(bits, start) || labels[start] != u8::MAX {
+                continue;
+            }
+            let label = n;
+            let keep = (n as usize) < MAX_COMP;
+            let mut sp = 0;
+            stack[sp] = start as u16;
+            sp += 1;
+            labels[start] = label;
+            while sp > 0 {
+                sp -= 1;
+                let c = stack[sp] as usize;
+                let (x, y) = (c & 15, c >> 4);
+                let mut push = |nc: usize, stack: &mut [u16; 256], sp: &mut usize| {
+                    if get(bits, nc) && labels[nc] == u8::MAX {
+                        labels[nc] = label;
+                        stack[*sp] = nc as u16;
+                        *sp += 1;
+                    }
+                };
+                if x > 0 {
+                    push(c - 1, &mut stack, &mut sp);
+                }
+                if x < 15 {
+                    push(c + 1, &mut stack, &mut sp);
+                }
+                if y > 0 {
+                    push(c - 16, &mut stack, &mut sp);
+                }
+                if y < 15 {
+                    push(c + 16, &mut stack, &mut sp);
+                }
+            }
+            if keep {
+                n += 1;
+            } else {
+                // Too many pockets: drop this one.
+                for i in 0..256 {
+                    if labels[i] == label {
+                        bits[i >> 6] &= !(1 << (i & 63));
+                        labels[i] = u8::MAX - 1;
+                    }
+                }
+            }
+        }
+        for l in labels.iter_mut() {
+            if *l >= MAX_COMP as u8 {
+                *l = 0;
+            }
+        }
+        (n, labels)
+    }
+
+    #[test]
+    fn components_match_flood_fill() {
+        let mut seed = 7u64;
+        let mut next = || {
+            seed = riot_core::mix(seed.wrapping_add(0x9e37_79b9_7f4a_7c15));
+            seed
+        };
+        for case in 0..20_000 {
+            // Random cells at various densities, sometimes cut by a wall.
+            let density = [16u64, 96, 128, 160, 200, 240][case % 6];
+            let mut bits = [0u64; 4];
+            for i in 0..256 {
+                if next() % 256 < density {
+                    bits[i >> 6] |= 1 << (i & 63);
+                }
+            }
+            if case % 3 == 0 {
+                let col = (next() % 16) as usize;
+                for ly in 0..16 {
+                    if next() % 8 != 0 {
+                        let i = ly * 16 + col;
+                        bits[i >> 6] &= !(1 << (i & 63));
+                    }
+                }
+            }
+            let (mut a, mut b) = (bits, bits);
+            let (n, labels) = components(&mut a);
+            let (n0, labels0) = components_flood(&mut b);
+            assert_eq!((n, a), (n0, b), "case {case}");
+            assert_eq!(labels.unwrap_or([0; 256]), labels0, "case {case}");
+        }
     }
 }
