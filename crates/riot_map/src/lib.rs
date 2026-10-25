@@ -403,7 +403,7 @@ impl Map {
                         let bmax = bmin + Vec2::new(4.0, 4.0);
                         for &(_, s) in tile_segs {
                             let seg = &segs[s as usize];
-                            if seg_box_dist2(seg.a, seg.b, bmin, bmax) <= margin * margin {
+                            if seg_box_near(seg, bmin, bmax, margin) {
                                 list.push(s);
                             }
                         }
@@ -1061,6 +1061,25 @@ fn clear_box(s: &Seg) -> [f32; 4] {
     ]
 }
 
+/// `seg_box_dist2(a, b, bmin, bmax) <= margin²`, skipping the exact test
+/// when the segment's bounding box is more than `margin` plus 0.05 m from the
+/// box along an axis. Then every distance that function takes is longer than
+/// `margin` and none of its edge intersections can register: rounding moves
+/// the points and intersections it computes by at most a few ulps of the
+/// coordinates (≤ 5 mm on an 8 km map), well inside the slack.
+#[inline]
+fn seg_box_near(s: &Seg, bmin: Vec2, bmax: Vec2, margin: f32) -> bool {
+    let g = margin + 0.05;
+    if s.a.x.max(s.b.x) < bmin.x - g
+        || s.a.x.min(s.b.x) > bmax.x + g
+        || s.a.y.max(s.b.y) < bmin.y - g
+        || s.a.y.min(s.b.y) > bmax.y + g
+    {
+        return false;
+    }
+    seg_box_dist2(s.a, s.b, bmin, bmax) <= margin * margin
+}
+
 /// Squared distance between a segment and an axis-aligned box.
 fn seg_box_dist2(a: Vec2, b: Vec2, bmin: Vec2, bmax: Vec2) -> f32 {
     let inside = |p: Vec2| p.x >= bmin.x && p.x <= bmax.x && p.y >= bmin.y && p.y <= bmax.y;
@@ -1355,5 +1374,70 @@ mod tests {
             assert_eq!((n, a), (n0, b), "case {case}");
             assert_eq!(labels.unwrap_or([0; 256]), labels0, "case {case}");
         }
+    }
+
+    /// Where the cheap box tests say "too far", the exact tests agree: just
+    /// past the slack, far from the origin, for long and nearly
+    /// axis-parallel segments.
+    #[test]
+    fn box_rejects_are_exact() {
+        let mut seed = 11u64;
+        let mut next = || {
+            seed = riot_core::mix(seed.wrapping_add(0x9e37_79b9_7f4a_7c15));
+            (seed >> 40) as f32 / (1u64 << 24) as f32
+        };
+        let (mut boxes_skipped, mut cells_skipped) = (0, 0);
+        for case in 0..200_000 {
+            let c = Vec2::new(next() * 8000.0 - 4000.0, next() * 8000.0 - 4000.0);
+            let len = [0.01, 0.5, 4.0, 30.0, 500.0, 8000.0][case % 6] * (0.5 + next());
+            let angle = if case % 3 == 0 {
+                (case % 4) as f32 * std::f32::consts::FRAC_PI_2 + (next() - 0.5) * 1e-4
+            } else {
+                next() * std::f32::consts::TAU
+            };
+            let seg = Seg {
+                a: c,
+                b: c + Vec2::new(angle.cos(), angle.sin()) * len,
+            };
+            let (lo, hi) = (
+                Vec2::new(seg.a.x.min(seg.b.x), seg.a.y.min(seg.b.y)),
+                Vec2::new(seg.a.x.max(seg.b.x), seg.a.y.max(seg.b.y)),
+            );
+            // A 4 m box just past the segment's box plus margin and slack,
+            // on a random side, slid along that side.
+            let margin = [0.45, 0.47, 0.6][case % 3];
+            let gap = margin + 0.05 + next() * 0.02;
+            let slide = |l: f32, h: f32, t: f32| l - 4.0 + (h - l + 8.0) * t;
+            let bmin = match case % 4 {
+                0 => Vec2::new(hi.x + gap, slide(lo.y, hi.y, next())),
+                1 => Vec2::new(lo.x - gap - 4.0, slide(lo.y, hi.y, next())),
+                2 => Vec2::new(slide(lo.x, hi.x, next()), hi.y + gap),
+                _ => Vec2::new(slide(lo.x, hi.x, next()), lo.y - gap - 4.0),
+            };
+            let bmax = bmin + Vec2::new(4.0, 4.0);
+            let near = seg_box_near(&seg, bmin, bmax, margin);
+            assert_eq!(
+                near,
+                seg_box_dist2(seg.a, seg.b, bmin, bmax) <= margin * margin,
+                "case {case}"
+            );
+            boxes_skipped += !near as u32;
+            // A cell centre just outside the clearance box.
+            let b = clear_box(&seg);
+            let e = next() * 0.01;
+            let (u, v) = (next(), next());
+            let p = match case % 4 {
+                0 => Vec2::new(b[1] + e, b[2] + (b[3] - b[2]) * u),
+                1 => Vec2::new(b[0] - e, b[2] + (b[3] - b[2]) * u),
+                2 => Vec2::new(b[0] + (b[1] - b[0]) * v, b[3] + e),
+                _ => Vec2::new(b[0] + (b[1] - b[0]) * v, b[2] - e),
+            };
+            if p.x < b[0] || p.x > b[1] || p.y < b[2] || p.y > b[3] {
+                cells_skipped += 1;
+                let d2 = (riot_core::math::closest_on_segment(p, seg.a, seg.b) - p).len2();
+                assert!(d2 >= CLEARANCE * CLEARANCE, "case {case}: {d2}");
+            }
+        }
+        assert!(boxes_skipped > 150_000 && cells_skipped > 150_000);
     }
 }
