@@ -594,7 +594,7 @@ impl Map {
     }
 
     /// Wall segments near a point: the list of the 4 m sub-cell containing it.
-    #[inline]
+    #[inline(always)]
     pub fn walls_near(&self, p: Vec2) -> &[u32] {
         let fx = (p.x + self.half) * (1.0 / 4.0);
         let fy = (p.y + self.half) * (1.0 / 4.0);
