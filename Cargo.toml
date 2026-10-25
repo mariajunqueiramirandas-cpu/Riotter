@@ -1,14 +1,6 @@
 [workspace]
 resolver = "3"
-members = [
-    "crates/riot_core",
-    "crates/riot_team",
-    "crates/riot_sim",
-    "crates/riot_data",
-    "crates/riot_headless",
-    "crates/riot_render",
-    "crates/riot_app",
-]
+members = ["crates/*"]
 default-members = [
     "crates/riot_core",
     "crates/riot_team",
