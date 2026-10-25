@@ -114,7 +114,10 @@ pub fn build_ground(map: &MapDef, detail: bool, decals: &DecalAtlas) -> MeshBuil
     let g = &map.ground;
     let painted = g.cell > 0.0 && !g.kinds.is_empty();
     if painted {
-        for y in 0..g.h as usize {
+        // Rows, and below other runs of items, are built on several threads
+        // (`MeshBuilder::par_items`, which keeps the item order).
+        let rows: Vec<usize> = (0..g.h as usize).collect();
+        m.append(MeshBuilder::par_items(&rows, |m, _, &y| {
             let mut x = 0usize;
             while x < g.w as usize {
                 let k = g.kinds[y * g.w as usize + x];
@@ -133,7 +136,7 @@ pub fn build_ground(map: &MapDef, detail: bool, decals: &DecalAtlas) -> MeshBuil
                 }
                 x = e;
             }
-        }
+        }));
         if detail {
             kerbs(map, &mut m);
         }
@@ -225,7 +228,8 @@ fn kerbs(map: &MapDef, m: &mut MeshBuilder) {
     // same for vertical edges.
     for vertical in [false, true] {
         let (outer, inner) = if vertical { (w + 1, h) } else { (h + 1, w) };
-        for o in 0..outer {
+        let lines: Vec<i64> = (0..outer).collect();
+        m.append(MeshBuilder::par_items(&lines, |m, _, &o| {
             for side in [false, true] {
                 let mut i = 0;
                 while i < inner {
@@ -284,7 +288,7 @@ fn kerbs(map: &MapDef, m: &mut MeshBuilder) {
                     i = e;
                 }
             }
-        }
+        }));
     }
 }
 
@@ -378,18 +382,18 @@ fn markings(map: &MapDef, m: &mut MeshBuilder, painted: bool) {
     let r = &map.roads;
     let (edges, degree) = road_edges(map);
     let white = tint([238, 236, 226]);
-    for &(i, j) in &edges {
+    m.append(MeshBuilder::par_items(&edges, |m, _, &(i, j)| {
         let (a, b) = (r.nodes[i], r.nodes[j]);
         let d = [b[0] - a[0], b[1] - a[1]];
         let l = (d[0] * d[0] + d[1] * d[1]).sqrt();
         if l < 12.0 {
-            continue;
+            return;
         }
         let u = [d[0] / l, d[1] / l];
         let n = [-u[1], u[0]];
         let mid = [a[0] + d[0] * 0.5, a[1] + d[1] * 0.5];
         let Some((w, off)) = road_span(map, painted, mid, n) else {
-            continue;
+            return;
         };
         let at = |t: f32, o: f32| {
             [
@@ -442,7 +446,7 @@ fn markings(map: &MapDef, m: &mut MeshBuilder, painted: bool) {
         }
         // Zebra crossings at busy junctions, stop lines before them.
         if w < 6.0 {
-            continue;
+            return;
         }
         for (end, deg, c) in [(false, degree[i], ca), (true, degree[j], cb)] {
             if deg < 3 {
@@ -464,13 +468,13 @@ fn markings(map: &MapDef, m: &mut MeshBuilder, painted: bool) {
             m.mat(gl::MARKINGS, Mat::Paint)
                 .line(at(ts, s0), at(ts, s1), 0.3, white);
         }
-    }
+    }));
 }
 
 /// Manholes and stains on roads, drains by the kerbs, cracks on pavements,
 /// leaves under trees and litter on squares.
 fn ground_decals(map: &MapDef, m: &mut MeshBuilder, decals: &DecalAtlas, painted: bool) {
-    let mut put = |d: Decal, p: [f32; 2], a: f32| {
+    let put = |m: &mut MeshBuilder, d: Decal, p: [f32; 2], a: f32| {
         let s = decals.get(d);
         let half = [s.body[0] * 0.5, s.body[1] * 0.5];
         m.at(gl::DECALS, Tex::Decals, Pass::Normal)
@@ -479,7 +483,8 @@ fn ground_decals(map: &MapDef, m: &mut MeshBuilder, decals: &DecalAtlas, painted
     let g = &map.ground;
     let (hw, hh) = (map.width * 0.5, map.height * 0.5);
     if painted {
-        for y in 0..g.h as i64 {
+        let rows: Vec<i64> = (0..g.h as i64).collect();
+        m.append(MeshBuilder::par_items(&rows, |m, _, &y| {
             for x in 0..g.w as i64 {
                 let k = g.kinds[(y * g.w as i64 + x) as usize];
                 let c = [
@@ -493,22 +498,22 @@ fn ground_decals(map: &MapDef, m: &mut MeshBuilder, decals: &DecalAtlas, painted
                 match k {
                     x if x == Ground::Road as u8 => {
                         if h.is_multiple_of(53) {
-                            put(Decal::Manhole, p, a);
+                            put(m, Decal::Manhole, p, a);
                         } else if h % 41 == 1 {
-                            put(Decal::Stain, p, a);
+                            put(m, Decal::Stain, p, a);
                         } else if h % 97 == 2 {
-                            put(Decal::Crack, p, a);
+                            put(m, Decal::Crack, p, a);
                         }
                     }
                     x if x == Ground::Pavement as u8 => {
                         if h.is_multiple_of(37) {
-                            put(Decal::Crack, p, a);
+                            put(m, Decal::Crack, p, a);
                         } else if h % 61 == 1 {
-                            put(Decal::Litter, p, a);
+                            put(m, Decal::Litter, p, a);
                         }
                     }
                     x if x == Ground::Plaza as u8 && h.is_multiple_of(29) => {
-                        put(Decal::Litter, p, a);
+                        put(m, Decal::Litter, p, a);
                     }
                     _ => {}
                 }
@@ -533,13 +538,13 @@ fn ground_decals(map: &MapDef, m: &mut MeshBuilder, decals: &DecalAtlas, painted
                             } else {
                                 0.0
                             };
-                            put(Decal::Drain, e, a);
+                            put(m, Decal::Drain, e, a);
                             break;
                         }
                     }
                 }
             }
-        }
+        }));
     } else {
         let r = &map.roads;
         let (edges, _) = road_edges(map);
@@ -550,7 +555,7 @@ fn ground_decals(map: &MapDef, m: &mut MeshBuilder, decals: &DecalAtlas, painted
             let mut t = 15.0;
             while t < l - 15.0 {
                 let p = [a[0] + d[0] * t / l, a[1] + d[1] * t / l];
-                put(Decal::Manhole, p, 0.0);
+                put(m, Decal::Manhole, p, 0.0);
                 t += 40.0;
             }
         }
@@ -566,7 +571,7 @@ fn ground_decals(map: &MapDef, m: &mut MeshBuilder, decals: &DecalAtlas, painted
                 c[0] + (unit(h) - 0.5) * 3.0,
                 c[1] + (unit(hash(h)) - 0.5) * 3.0,
             ];
-            put(Decal::Leaves, p, unit(hash(h ^ 9)) * 6.0);
+            put(m, Decal::Leaves, p, unit(hash(h ^ 9)) * 6.0);
         }
     }
 }
@@ -587,17 +592,17 @@ fn sweep(part: &mut mesh::Part, pts: &[[f32; 2]], d: [f32; 2], c: Rgba) {
 
 /// Building, wall, tree and arcade shadows on the ground.
 fn ground_shadows(map: &MapDef, m: &mut MeshBuilder) {
-    for (i, p) in map.solids.iter().enumerate() {
+    m.append(MeshBuilder::par_items(&map.solids, |m, i, p| {
         let height = match p.kind {
             SolidKind::Building => 3.5 + unit(hash(i as u32 ^ 0x5bd1)) * 3.5,
             SolidKind::Wall => 2.2,
             SolidKind::Fence => 1.2,
-            SolidKind::Water => continue,
+            SolidKind::Water => return,
         };
         let d = [SUN[0] * height, SUN[1] * height];
         sweep(m.shadow(gl::SHADOWS), &p.points, d, SHADOW);
-    }
-    for o in &map.overhead {
+    }));
+    m.append(MeshBuilder::par_items(&map.overhead, |m, _, o| {
         let height = if is_canopy(o) { 3.0 } else { 2.6 };
         let d = [SUN[0] * height, SUN[1] * height];
         let moved: Vec<[f32; 2]> = o
@@ -606,34 +611,31 @@ fn ground_shadows(map: &MapDef, m: &mut MeshBuilder) {
             .map(|p| [p[0] + d[0], p[1] + d[1]])
             .collect();
         m.shadow(gl::SHADOWS).polygon(&moved, SHADOW);
-    }
+    }));
 }
 
 /// The roof mesh. Without `detail`: flat fills, no shadows, plant or
 /// lines.
 pub fn build_roofs(map: &MapDef, detail: bool, decals: &DecalAtlas) -> MeshBuilder {
-    let mut m = MeshBuilder::default();
-    for (i, p) in map.solids.iter().enumerate() {
-        match p.kind {
-            SolidKind::Building => building(&mut m, p, hash(i as u32), detail, decals),
-            SolidKind::Wall => {
-                m.mat(rl::BASE, Mat::Concrete)
-                    .polygon(&p.points, tint([200, 200, 206]));
-                if detail {
-                    m.mat(rl::LINES, Mat::Solid)
-                        .px_outline(&p.points, 1.0, OUTLINE);
-                }
+    let mut m = MeshBuilder::par_items(&map.solids, |m, i, p| match p.kind {
+        SolidKind::Building => building(m, p, hash(i as u32), detail, decals),
+        SolidKind::Wall => {
+            m.mat(rl::BASE, Mat::Concrete)
+                .polygon(&p.points, tint([200, 200, 206]));
+            if detail {
+                m.mat(rl::LINES, Mat::Solid)
+                    .px_outline(&p.points, 1.0, OUTLINE);
             }
-            SolidKind::Fence => {
-                m.mat(rl::BASE, Mat::Wood).polygon(&p.points, WHITE);
-                if detail {
-                    m.mat(rl::LINES, Mat::Solid)
-                        .px_outline(&p.points, 1.0, [52, 36, 24, 255]);
-                }
-            }
-            SolidKind::Water => {}
         }
-    }
+        SolidKind::Fence => {
+            m.mat(rl::BASE, Mat::Wood).polygon(&p.points, WHITE);
+            if detail {
+                m.mat(rl::LINES, Mat::Solid)
+                    .px_outline(&p.points, 1.0, [52, 36, 24, 255]);
+            }
+        }
+        SolidKind::Water => {}
+    });
     if detail {
         // Street lamps: a dark head with a pale lens.
         for l in crate::lamps::street_lamps(map) {
@@ -643,7 +645,7 @@ pub fn build_roofs(map: &MapDef, detail: bool, decals: &DecalAtlas) -> MeshBuild
                 .disc(l.pos, 0.1, [250, 236, 190, 255]);
         }
     }
-    for (i, o) in map.overhead.iter().enumerate() {
+    m.append(MeshBuilder::par_items(&map.overhead, |m, i, o| {
         let h = hash(i as u32 ^ 0x77);
         if is_canopy(o) {
             // Varied greens, a dark rim and a lit north-west edge.
@@ -685,7 +687,7 @@ pub fn build_roofs(map: &MapDef, detail: bool, decals: &DecalAtlas) -> MeshBuild
         } else {
             m.mat(rl::CANOPY, Mat::Metal).polygon(&o.points, WHITE);
         }
-    }
+    }));
     m
 }
 

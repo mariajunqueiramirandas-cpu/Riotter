@@ -310,24 +310,37 @@ fn key(slot: usize) -> (Pass, Tex) {
 }
 
 /// Layers of parts, drawn in order. A layer holds one slot per `(pass,
-/// tex)` key, so finding a part is an index, not a search.
+/// tex)` key, so finding a part is an index, not a search. A slot's part
+/// may be in pieces, one per builder [`MeshBuilder::append`] joined; the
+/// pieces are concatenated by `finish`.
 #[derive(Default)]
 pub struct MeshBuilder {
-    layers: Vec<Vec<Option<Part>>>,
+    layers: Vec<Vec<Vec<Part>>>,
 }
 
 impl MeshBuilder {
-    /// The part of `layer` for a texture and pass.
+    /// The pieces of a slot, made if missing.
     #[inline]
-    pub fn at(&mut self, layer: usize, tex: Tex, pass: Pass) -> &mut Part {
+    fn slot_mut(&mut self, layer: usize, slot: usize) -> &mut Vec<Part> {
         if self.layers.len() <= layer {
             self.layers.resize_with(layer + 1, Vec::new);
         }
         let parts = &mut self.layers[layer];
         if parts.is_empty() {
-            parts.resize_with(KEYS, || None);
+            parts.resize_with(KEYS, Vec::new);
         }
-        parts[slot(pass, tex)].get_or_insert_with(Part::default)
+        &mut parts[slot]
+    }
+
+    /// The part of `layer` for a texture and pass.
+    #[inline]
+    pub fn at(&mut self, layer: usize, tex: Tex, pass: Pass) -> &mut Part {
+        let pieces = self.slot_mut(layer, slot(pass, tex));
+        if pieces.is_empty() {
+            pieces.push(Part::default());
+        }
+        let last = pieces.len() - 1;
+        &mut pieces[last]
     }
 
     /// Shortcut for a material in the normal pass.
@@ -342,6 +355,19 @@ impl MeshBuilder {
         self.at(layer, Tex::Mat(Mat::Solid), Pass::Shadow)
     }
 
+    /// Everything `other` holds, after what this holds: the mesh is the one
+    /// a single builder makes when it gets this one's primitives and then
+    /// `other`'s. The pieces move; nothing is copied until `finish`.
+    pub fn append(&mut self, other: MeshBuilder) {
+        for (l, layer) in other.layers.into_iter().enumerate() {
+            for (k, pieces) in layer.into_iter().enumerate() {
+                if !pieces.is_empty() {
+                    self.slot_mut(l, k).extend(pieces);
+                }
+            }
+        }
+    }
+
     fn parts(&self) -> impl Iterator<Item = &Part> {
         self.layers.iter().flatten().flatten()
     }
@@ -352,20 +378,24 @@ impl MeshBuilder {
         let mut idx = Vec::with_capacity(self.parts().map(|p| p.idx.len()).sum());
         let mut batches = Vec::new();
         for layer in self.layers {
-            for (k, part) in layer.into_iter().enumerate() {
-                let Some(part) = part.filter(|p| !p.idx.is_empty()) else {
+            for (k, pieces) in layer.into_iter().enumerate() {
+                let count: usize = pieces.iter().map(|p| p.idx.len()).sum();
+                if count == 0 {
                     continue;
-                };
+                }
                 let (pass, tex) = key(k);
-                let base = verts.len() as u32;
                 let start = idx.len();
-                verts.extend_from_slice(&part.verts);
-                idx.extend(part.idx.iter().map(|i| i + base));
+                // Each piece's indices count from its own first vertex.
+                for part in pieces {
+                    let base = verts.len() as u32;
+                    verts.extend_from_slice(&part.verts);
+                    idx.extend(part.idx.iter().map(|i| i + base));
+                }
                 batches.push(BatchDesc {
                     pass,
                     tex,
                     start,
-                    count: part.idx.len(),
+                    count,
                 });
             }
         }
@@ -375,6 +405,61 @@ impl MeshBuilder {
     /// Triangles in all layers.
     pub fn triangles(&self) -> usize {
         self.parts().map(|p| p.idx.len() / 3).sum()
+    }
+
+    /// A builder for `items`, built in chunks on the available cores by
+    /// `add(builder, index, item)`: the chunks' builders are appended in item
+    /// order, so the mesh is the one a single pass over the items builds.
+    pub fn par_items<T: Sync>(
+        items: &[T],
+        add: impl Fn(&mut MeshBuilder, usize, &T) + Sync,
+    ) -> MeshBuilder {
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+        // A few chunks per thread, so uneven items still share out.
+        let chunk = (items.len() / (threads * 4)).clamp(16, 1024);
+        let chunks = items.len().div_ceil(chunk);
+        let build = |c: usize| {
+            let mut m = MeshBuilder::default();
+            let lo = c * chunk;
+            for (k, item) in items[lo..items.len().min(lo + chunk)].iter().enumerate() {
+                add(&mut m, lo + k, item);
+            }
+            m
+        };
+        let mut out = MeshBuilder::default();
+        // Small maps are quicker without threads.
+        if threads < 2 || items.len() < 512 {
+            for (k, item) in items.iter().enumerate() {
+                add(&mut out, k, item);
+            }
+            return out;
+        }
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let mut built: Vec<(usize, MeshBuilder)> = std::thread::scope(|s| {
+            let workers: Vec<_> = (0..threads.min(chunks))
+                .map(|_| {
+                    s.spawn(|| {
+                        let mut mine = Vec::new();
+                        loop {
+                            let c = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if c >= chunks {
+                                break mine;
+                            }
+                            mine.push((c, build(c)));
+                        }
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .flat_map(|w| w.join().expect("mesh builder thread"))
+                .collect()
+        });
+        built.sort_unstable_by_key(|&(c, _)| c);
+        for (_, m) in built {
+            out.append(m);
+        }
+        out
     }
 }
 
@@ -565,6 +650,39 @@ pub fn runs(verts: &[Vertex], idx: &[u32], start: usize, count: usize) -> Vec<Ru
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn appended_builders_make_one_mesh() {
+        let square = [[0.0, 0.0], [2.0, 0.0], [2.0, 1.0], [0.0, 1.0]];
+        let add = |m: &mut MeshBuilder, k: usize| {
+            let x = k as f32;
+            m.mat(k % 3, Mat::ALL[k % 5])
+                .rect(x, 0.0, x + 1.0, 1.0, WHITE);
+            m.shadow(1).polygon(&square, [0, 0, 0, 90]);
+            m.at(2, Tex::Decals, Pass::Dither)
+                .line([x, 0.0], [x, 3.0], 0.2, WHITE);
+        };
+        let items: Vec<usize> = (0..1000).collect();
+        let mut one = MeshBuilder::default();
+        for &k in &items {
+            add(&mut one, k);
+        }
+        let joined = MeshBuilder::par_items(&items, |m, _, &k| add(m, k));
+        let (a, b) = (one.finish(), joined.finish());
+        let bits = |v: &[Vertex]| {
+            v.iter()
+                .map(|x| (x.pos.map(f32::to_bits), x.uv.map(f32::to_bits), x.color))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(bits(&a.0), bits(&b.0));
+        assert_eq!(a.1, b.1);
+        let batches = |v: &[BatchDesc]| {
+            v.iter()
+                .map(|x| (x.pass, x.tex, x.start, x.count))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(batches(&a.2), batches(&b.2));
+    }
 
     #[test]
     fn slots_follow_the_key_order() {
