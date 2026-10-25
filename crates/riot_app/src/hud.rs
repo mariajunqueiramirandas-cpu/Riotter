@@ -6,6 +6,7 @@ use riot_render::RenderStats;
 use riot_render::debug::{OBJECTIVE_COLOURS, OBJECTIVE_NAMES, SUPPLY_NAMES};
 use riot_sim::Phase;
 use riot_sim::snapshot::{Overlay, Snapshot};
+use riot_sim::tactics::{Call, OpKind, RADIO, call_text};
 use riot_sim::world::PHASES;
 
 use crate::input::{Input, stance_name};
@@ -21,7 +22,7 @@ const ESCALATION: [&str; 5] = [
 
 const HELP_LINE: &str = "WASD/arrows/right-drag pan · wheel zoom · Space pause · 1-4 / +- speed · \
      M H X tool · click place · [ ] slot · T stance · R organizer · B broadcast · C chant · \
-     Q/E supplies · G gas · F fire · U spawn · O overlay · L lod · K J pixels · F1 help";
+     Q/E supplies · G gas · F fire · U spawn · O overlay · L lod · Tab police plan · K J pixels · F1 help";
 
 const HELP: [&str; 15] = [
     "Camera   WASD / arrows (Shift = faster), right or middle drag, wheel = zoom, Home = whole map",
@@ -33,7 +34,7 @@ const HELP: [&str; 15] = [
     "         C chant on/off (raises morale around them, tires them)",
     "Supply   Q choose water / medic / shields / barricade · E drop 20 at the cursor",
     "Debug    G gas canister · F ignite · U spawn 100 people · Y threat · PgUp force escalation",
-    "View     O cycle field overlay · L level of detail · Tab markers · V roofs · P phase timings",
+    "View     O cycle field overlay · L level of detail · Tab markers and the police plan · V roofs · P phase timings",
     "         K pixel art on/off · J pixel size 1× / 2× · N time-of-day light",
     "",
     "Nothing here is an order: objectives only matter to people who hear about them,",
@@ -68,6 +69,107 @@ fn clock(minute: f32) -> String {
 fn text(s: &str, x: f32, y: f32, size: f32, col: Color) {
     draw_text(s, x + 1.0, y + 1.0, size, Color::new(0.0, 0.0, 0.0, 0.85));
     draw_text(s, x, y, size, col);
+}
+
+/// What the police are doing, in one line.
+fn police_line(snap: &Snapshot) -> String {
+    let (mut up, mut building, mut breached, mut waiting) = (0, 0, 0, 0);
+    for c in &snap.cordons {
+        match c.state {
+            0 | 1 => building += 1,
+            2 => up += 1,
+            _ => breached += 1,
+        }
+        if c.ambush == 1 {
+            waiting += 1;
+        }
+    }
+    let mut by = [0u32; 7];
+    for t in &snap.tracks {
+        by[(t.op as usize).min(6)] += 1;
+    }
+    let mut parts = vec![format!("police: {up} barricades up")];
+    if building > 0 {
+        parts.push(format!("{building} going up"));
+    }
+    if breached > 0 {
+        parts.push(format!("{breached} breached"));
+    }
+    if waiting > 0 {
+        parts.push(format!(
+            "{waiting} ambush{} waiting",
+            if waiting == 1 { "" } else { "es" }
+        ));
+    }
+    for (op, n) in by.iter().enumerate().skip(1) {
+        if *n > 0 {
+            parts.push(format!(
+                "{} {} crowd{}",
+                OpKind::from_u8(op as u8).name(),
+                n,
+                if *n == 1 { "" } else { "s" }
+            ));
+        }
+    }
+    parts.join("  ·  ")
+}
+
+/// The police radio: the commander's latest calls, top right, newest first.
+fn draw_radio(snap: &Snapshot, sw: f32, left: f32) {
+    let st = &snap.stats;
+    let n = st.radio_n as usize;
+    if n == 0 {
+        return;
+    }
+    let shown = n.min(RADIO).min(6);
+    let mut rows: Vec<(String, Color)> = Vec::with_capacity(shown);
+    for k in 0..shown {
+        let c = &st.radio[(n - 1 - k) % RADIO];
+        let age = snap.tick.saturating_sub(c.tick) as f32 / 20.0;
+        let fade = (1.0 - age / 120.0).clamp(0.35, 1.0);
+        let col = match c.call {
+            Call::AmbushSprung | Call::Breach | Call::LineBroken | Call::Opened => {
+                Color::new(1.0, 0.4, 0.35, fade)
+            }
+            Call::Gas | Call::WaterCannon | Call::Escalate | Call::Warning => {
+                Color::new(1.0, 0.7, 0.3, fade)
+            }
+            Call::Cordon | Call::BarricadeUp | Call::AmbushSet | Call::FallBack => {
+                Color::new(1.0, 0.85, 0.45, fade)
+            }
+            _ => Color::new(0.7, 0.82, 1.0, fade),
+        };
+        let m = snap.stats.clock_minute - age / 60.0;
+        let m = m.max(0.0);
+        rows.push((
+            format!(
+                "{:02}:{:02}:{:02}  {}",
+                (m as u32 / 60) % 24,
+                m as u32 % 60,
+                (m.fract() * 60.0) as u32,
+                call_text(c)
+            ),
+            col,
+        ));
+    }
+    let w = rows
+        .iter()
+        .map(|(l, _)| measure_text(l, None, 15, 1.0).width)
+        .fold(measure_text("POLICE RADIO", None, 15, 1.0).width, f32::max)
+        + 20.0;
+    let x = (sw - w - 6.0).max(left);
+    let h = (rows.len() + 1) as f32 * 17.0 + 12.0;
+    draw_rectangle(x, 6.0, w, h, Color::new(0.03, 0.05, 0.1, 0.78));
+    text(
+        "POLICE RADIO",
+        x + 10.0,
+        22.0,
+        15.0,
+        Color::new(0.45, 0.65, 1.0, 1.0),
+    );
+    for (k, (l, c)) in rows.iter().enumerate() {
+        text(l, x + 10.0, 39.0 + k as f32 * 17.0, 15.0, *c);
+    }
 }
 
 /// Everything the HUD shows.
@@ -145,6 +247,9 @@ pub fn draw(h: &HudInput) {
         ),
         if s.escalation >= 3 { warn } else { dim },
     ));
+    if let Some(snap) = h.snap {
+        lines.push((police_line(snap), Color::new(0.6, 0.75, 1.0, 1.0)));
+    }
     let i = h.input;
     let organizer = match i.selected {
         Some(id) => format!(
@@ -242,6 +347,9 @@ pub fn draw(h: &HudInput) {
     draw_rectangle(6.0, 6.0, w, ph, Color::new(0.05, 0.06, 0.08, 0.72));
     for (k, (l, c)) in lines.iter().enumerate() {
         text(l, 16.0, 24.0 + k as f32 * lines_h, 16.0, *c);
+    }
+    if let Some(snap) = h.snap {
+        draw_radio(snap, sw, w + 16.0);
     }
 
     // Toast in the middle at the top, help line at the bottom.

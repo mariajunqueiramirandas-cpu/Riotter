@@ -1,8 +1,10 @@
 //! Debug and player-facing markers (DESIGN §18.2 debug overlays): objective
-//! rings, supply drops, police squads and their formation targets, entry
-//! points, the selected organizer and the cursor tool preview. Shapes are
-//! drawn in map coordinates; labels are collected and drawn in screen space
-//! afterwards so text stays crisp at every zoom.
+//! rings, supply drops, police squads and their formation targets, the
+//! police commander's plan (where it thinks each crowd is going and what it
+//! does about it, its barricades and ambushes), entry points, the selected
+//! organizer and the cursor tool preview. Shapes are drawn in map
+//! coordinates; labels are collected and drawn in screen space afterwards so
+//! text stays crisp at every zoom.
 
 use macroquad::prelude::*;
 use riot_sim::mapdef::{EntryDef, EntryKind};
@@ -41,7 +43,7 @@ pub const DROP_SPRITES_FROM: f32 = 6.0;
 pub const SUPPLY_NAMES: [&str; 4] = ["water", "medic", "shields", "barricade"];
 /// Objective names by `ObjectiveKind`.
 pub const OBJECTIVE_NAMES: [&str; 3] = ["march-to", "hold", "disperse"];
-const DOCTRINES: [&str; 9] = [
+const DOCTRINES: [&str; riot_sim::police::DOCTRINES] = [
     "idle",
     "travel",
     "hold line",
@@ -51,6 +53,22 @@ const DOCTRINES: [&str; 9] = [
     "snatch",
     "retreat",
     "reserve",
+    "barricade",
+    "ambush",
+    "charge",
+    "escort",
+];
+
+/// Police operation colours by `OpKind`: none, watch, escort, cordon,
+/// protect, contain, disperse.
+pub const OP_COLOURS: [Color; 7] = [
+    Color::new(0.6, 0.6, 0.6, 1.0),
+    Color::new(0.55, 0.75, 1.0, 1.0),
+    Color::new(0.4, 0.9, 0.95, 1.0),
+    Color::new(1.0, 0.72, 0.2, 1.0),
+    Color::new(0.35, 0.5, 1.0, 1.0),
+    Color::new(0.8, 0.45, 1.0, 1.0),
+    Color::new(1.0, 0.35, 0.3, 1.0),
 ];
 
 fn with_alpha(c: Color, a: f32) -> Color {
@@ -70,6 +88,149 @@ fn dashed_ring(c: Vec2, r: f32, px: f32, zoom: f32, col: Color, phase: f32) {
         let p0 = c + vec2(a0.cos(), a0.sin()) * r;
         let p1 = c + vec2(a1.cos(), a1.sin()) * r;
         draw_line(p0.x, p0.y, p1.x, p1.y, w, col);
+    }
+}
+
+/// A dashed segment `px` pixels wide, dashes about 7 pixels long.
+fn dashed_line(a: Vec2, b: Vec2, px: f32, zoom: f32, col: Color, phase: f32) {
+    let len = (b - a).length();
+    if len < 1e-3 {
+        return;
+    }
+    let dash = 7.0 / zoom;
+    let dir = (b - a) / len;
+    let mut t = (phase.fract() - 1.0) * 2.0 * dash;
+    while t < len {
+        let (t0, t1) = (t.max(0.0), (t + dash).min(len));
+        if t1 > t0 {
+            let (p0, p1) = (a + dir * t0, a + dir * t1);
+            draw_line(p0.x, p0.y, p1.x, p1.y, px / zoom, col);
+        }
+        t += 2.0 * dash;
+    }
+}
+
+/// Seconds as m:ss.
+fn mmss(s: f32) -> String {
+    let s = s.max(0.0) as u32;
+    format!("{}:{:02}", s / 60, s % 60)
+}
+
+/// The police commander's plan, over everything: each crowd's predicted
+/// route and what the police do about it, barricades by state, and squads
+/// waiting in ambush around their corners.
+pub fn draw_police_plan(snap: &Snapshot, cam: &Camera, time: f32, labels: &mut Vec<Label>) {
+    let z = cam.zoom;
+    for t in &snap.tracks {
+        let col = OP_COLOURS[(t.op as usize).min(6)];
+        let n = t.route_n as usize;
+        if n >= 2 && t.op != 0 {
+            let faint = with_alpha(col, 0.55);
+            for k in 0..n - 1 {
+                let a = vec2(t.route[k][0], t.route[k][1]);
+                let b = vec2(t.route[k + 1][0], t.route[k + 1][1]);
+                dashed_line(a, b, 1.5, z, faint, -time * 1.5);
+            }
+            // An arrowhead where the route ends.
+            let a = vec2(t.route[n - 2][0], t.route[n - 2][1]);
+            let b = vec2(t.route[n - 1][0], t.route[n - 1][1]);
+            let d = (b - a).normalize_or_zero();
+            let s = 7.0 / z;
+            let l = b - d * s + d.perp() * s * 0.6;
+            let r = b - d * s - d.perp() * s * 0.6;
+            draw_triangle(b, l, r, faint);
+        }
+        if z > 0.35 && t.op != 0 {
+            let name = riot_sim::tactics::OpKind::from_u8(t.op).name();
+            let eta = if t.site && t.eta.is_finite() && t.eta < 3600.0 {
+                format!(" · site in {}", mmss(t.eta))
+            } else {
+                String::new()
+            };
+            labels.push(Label {
+                at: vec2(t.x, t.y - t.radius.min(30.0)),
+                text: format!("{:.0} → {}{}", t.count, name, eta),
+                color: col,
+                size: 14.0,
+            });
+        }
+    }
+    for c in &snap.cordons {
+        let p = vec2(c.x, c.y);
+        let ax = vec2(c.axis[0], c.axis[1]);
+        let face = vec2(c.face[0], c.face[1]);
+        let (a, b) = (p - ax * c.half, p + ax * c.half);
+        // Planned, building, up, breached.
+        let (col, text) = match c.state {
+            0 => (Color::new(1.0, 0.8, 0.3, 0.7), "barricade ordered"),
+            1 => (Color::new(1.0, 0.75, 0.2, 0.85), "putting up a barricade"),
+            2 => (Color::new(1.0, 0.62, 0.1, 0.95), "police barricade"),
+            _ => (Color::new(1.0, 0.25, 0.2, 0.95), "barricade breached"),
+        };
+        // The plan, until the barriers stand and speak for themselves; zoomed
+        // out, where a barrier is a pixel, a mark on the crowd's side.
+        if c.state < 2 {
+            dashed_line(a, b, 3.0, z, col, time);
+        } else if z < 6.0 {
+            let off = face * (3.0 / z);
+            draw_line(
+                a.x + off.x,
+                a.y + off.y,
+                b.x + off.x,
+                b.y + off.y,
+                2.0 / z,
+                col,
+            );
+        }
+        if z > 0.6 {
+            labels.push(Label {
+                at: p + face * (8.0 / z.min(1.5)),
+                text: text.into(),
+                color: col,
+                size: 13.0,
+            });
+        }
+        let at = vec2(c.ambush_at[0], c.ambush_at[1]);
+        let j = vec2(c.junction[0], c.junction[1]);
+        match c.ambush {
+            1 => {
+                // Waiting around the corner.
+                let red = Color::new(1.0, 0.2, 0.25, 0.75);
+                let r = (2.5f32).max(6.0 / z);
+                let pulse = 0.6 + 0.4 * (time * 3.0).sin();
+                draw_poly_lines(
+                    at.x,
+                    at.y,
+                    4,
+                    r,
+                    45.0,
+                    2.0 / z,
+                    with_alpha(red, 0.5 + 0.4 * pulse),
+                );
+                dashed_line(at, j, 1.5, z, with_alpha(red, 0.5), time);
+                if z > 0.8 {
+                    labels.push(Label {
+                        at: at + vec2(0.0, r + 6.0 / z),
+                        text: "ambush".into(),
+                        color: red,
+                        size: 13.0,
+                    });
+                }
+            }
+            2 => {
+                let red = Color::new(1.0, 0.15, 0.15, 0.9);
+                draw_line(at.x, at.y, j.x, j.y, 3.0 / z, red);
+                let d = (j - at).normalize_or_zero();
+                let s = 9.0 / z;
+                draw_triangle(
+                    j + d * s,
+                    j + d.perp() * s * 0.7,
+                    j - d.perp() * s * 0.7,
+                    red,
+                );
+            }
+            _ => {}
+        }
     }
 }
 
@@ -139,10 +300,12 @@ pub fn draw_debug_markers(
     snap: &Snapshot,
     entries: &[EntryDef],
     cam: &Camera,
+    time: f32,
     labels: &mut Vec<Label>,
 ) {
     let z = cam.zoom;
     let blue = Color::new(0.35, 0.55, 1.0, 0.9);
+    draw_police_plan(snap, cam, time, labels);
     for s in &snap.squads {
         let c = vec2(s.x, s.y);
         let t = vec2(s.tx, s.ty);
@@ -154,7 +317,7 @@ pub fn draw_debug_markers(
                 at: c + vec2(0.0, 6.0 / z.min(1.0)),
                 text: format!(
                     "{} ×{}",
-                    DOCTRINES[(s.doctrine as usize).min(8)],
+                    DOCTRINES[(s.doctrine as usize).min(DOCTRINES.len() - 1)],
                     s.officers
                 ),
                 color: blue,
