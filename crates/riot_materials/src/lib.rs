@@ -9,7 +9,7 @@
 //! the texture crisp instead of blurred. Joints and edge highlights appear
 //! only where a level has the pixels for them.
 
-use crate::art::{self, Img, Rgb, bayer, fbm, hex, mix, rnd, tone, vnoise};
+use riot_art::{self as art, Img, Rgb, bayer, fbm, hex, mix, rnd, tone, vnoise};
 
 /// Level-0 pixels per tile side.
 pub const TILE_PX: usize = 512;
@@ -727,7 +727,7 @@ mod tests {
         assert!((TILE_M - 10.666_667).abs() < 1e-4);
     }
 
-    /// `RIOT_MATERIALS_PNG=/dir cargo test -p riot_render dump_materials -- --ignored`
+    /// `RIOT_MATERIALS_PNG=/dir cargo test -p riot_materials dump_materials -- --ignored`
     /// writes every material at every level for inspection.
     #[test]
     #[ignore]
@@ -736,12 +736,8 @@ mod tests {
         for m in Mat::ALL {
             for level in 0..art::LEVELS {
                 let img = generate(m, level);
-                macroquad::texture::Image {
-                    bytes: img.bytes(),
-                    width: img.w as u16,
-                    height: img.h as u16,
-                }
-                .export_png(&format!("{dir}/{m:?}-{level}.png"));
+                let path = format!("{dir}/{m:?}-{level}.png");
+                art::png::dump(&path, img.w, img.h, &img.bytes());
             }
         }
     }

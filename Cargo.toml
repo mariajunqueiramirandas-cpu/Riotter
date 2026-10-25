@@ -21,6 +21,11 @@ riot_team = { path = "crates/riot_team" }
 riot_sim = { path = "crates/riot_sim" }
 riot_data = { path = "crates/riot_data" }
 riot_render = { path = "crates/riot_render" }
+riot_art = { path = "crates/riot_art" }
+riot_materials = { path = "crates/riot_materials" }
+riot_sheets = { path = "crates/riot_sheets" }
+riot_sprites = { path = "crates/riot_sprites" }
+riot_mesh = { path = "crates/riot_mesh" }
 rayon = "1.12"
 bytemuck = { version = "1.25", features = ["derive"] }
 libm = "0.2.16"
