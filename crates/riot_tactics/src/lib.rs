@@ -2099,6 +2099,7 @@ fn water(w: &mut World, t: &Track) {
 
 /// Heading offset (in 1.4° steps) of a water cannon's sweep at `tick`: a
 /// triangle wave over four seconds.
+#[inline]
 pub fn spray_sweep(tick: u32) -> i32 {
     let ph = (tick % 80) as i32;
     let tri = if ph < 40 { ph } else { 80 - ph };
@@ -2106,6 +2107,7 @@ pub fn spray_sweep(tick: u32) -> i32 {
 }
 
 /// Officers going for someone: the person, not their formation slot.
+#[inline]
 pub fn grab_target(w: &World, i: usize) -> Option<Vec2> {
     if Action::from_u8(w.people.stat[i][stat::ACTION]) != Action::Arrest {
         return None;
@@ -2116,6 +2118,7 @@ pub fn grab_target(w: &World, i: usize) -> Option<Vec2> {
 
 /// How many of a squad's officers on the map have fled their posts, of how
 /// many.
+#[inline]
 pub fn fled(w: &World, officers: &[u32]) -> (u32, u32) {
     let (mut n, mut broke) = (0, 0);
     for &o in officers {
@@ -2131,6 +2134,7 @@ pub fn fled(w: &World, officers: &[u32]) -> (u32, u32) {
 
 /// Slot heading in a kettle ring, kept out of an open gate's arc: officers
 /// there stand at the gate's posts instead.
+#[inline]
 pub fn kettle_heading(h: u8, gate: Vec2) -> u8 {
     if gate == Vec2::ZERO {
         return h;
