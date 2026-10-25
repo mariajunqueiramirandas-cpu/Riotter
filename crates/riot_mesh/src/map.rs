@@ -197,15 +197,29 @@ fn kerbs(map: &MapDef, m: &mut MeshBuilder) {
     let g = &map.ground;
     let (hw, hh) = (map.width * 0.5, map.height * 0.5);
     let (w, h) = (g.w as i64, g.h as i64);
-    let kind = |x: i64, y: i64| -> u8 {
-        if x < 0 || y < 0 || x >= w || y >= h {
-            Ground::Pavement as u8
-        } else {
-            g.kinds[(y * w + x) as usize]
+    // Cell flags with a border of pavement one cell wide, so the scans
+    // below need no bounds tests: road, or a kerb's other side (neither
+    // road nor water).
+    const ROAD: u8 = 1;
+    const SIDE: u8 = 2;
+    let pw = w as usize + 2;
+    let mut flags = vec![SIDE; pw * (h as usize + 2)];
+    for (y, row) in g
+        .kinds
+        .chunks(w.max(1) as usize)
+        .take(h as usize)
+        .enumerate()
+    {
+        for (x, &k) in row.iter().take(w as usize).enumerate() {
+            flags[(y + 1) * pw + x + 1] = match k {
+                k if k == Ground::Road as u8 => ROAD,
+                k if k == Ground::Water as u8 => 0,
+                _ => SIDE,
+            };
         }
-    };
-    let road = Ground::Road as u8;
-    let edge = |a: u8, b: u8| a == road && b != road && b != Ground::Water as u8;
+    }
+    let kind = |x: i64, y: i64| flags[(y + 1) as usize * pw + (x + 1) as usize];
+    let edge = |a: u8, b: u8| a & ROAD != 0 && b & SIDE != 0;
     let gutter = tint([168, 168, 172]);
     // Horizontal edges between rows y-1 and y, merged along x; then the
     // same for vertical edges.
