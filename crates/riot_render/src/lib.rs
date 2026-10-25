@@ -20,8 +20,9 @@
 //!    the streets, so they are drawn above the roofs instead of in 2–3.
 //!
 //! The buffer is then composited to the screen with a colour grade for the
-//! time of day, and markers, labels and tools are drawn on top at screen
-//! resolution.
+//! time of day and, at dusk and night, the light of street lamps, fires and
+//! police light bars ([`lights`]); markers, labels and tools are drawn on
+//! top at screen resolution.
 //!
 //! People are culled on the CPU only when a new snapshot arrives or the view
 //! leaves the culled area (with a margin); position and heading are
@@ -32,6 +33,7 @@ pub mod camera;
 pub mod debug;
 pub mod effects;
 pub mod fields;
+pub mod lights;
 pub mod map;
 pub mod materials;
 pub mod mesh;
@@ -124,6 +126,8 @@ pub struct RenderStats {
     pub people_draws: usize,
     pub field_chunks: usize,
     pub particles: usize,
+    /// Lights drawn (at dusk and night).
+    pub lights: usize,
     /// Map triangles drawn.
     pub map_triangles: usize,
     /// CPU time spent culling and uploading people and updating field
@@ -219,6 +223,7 @@ pub struct Renderer {
     people: PeoplePipeline,
     fields: fields::FieldRenderer,
     effects: effects::Effects,
+    lights: lights::LightRenderer,
     pixel: PixelBuffer,
     things: ThingAtlas,
     props: StreamMesh,
@@ -301,6 +306,7 @@ impl Renderer {
                 people,
                 fields: fields::FieldRenderer::new(ctx),
                 effects: effects::Effects::new(),
+                lights: lights::LightRenderer::new(ctx, map),
                 pixel: PixelBuffer::new(ctx),
                 meshes,
                 things,
@@ -504,13 +510,32 @@ impl Renderer {
         }
         timer.mark(6);
 
-        // Composite to the screen.
-        set_default_camera();
+        // Light at dusk and night.
         let g = if opts.grade {
             grade(f.cur.stats.clock_minute)
         } else {
             [1.0; 4]
         };
+        if pixel::light_strength(g) > 0.0 {
+            let light_pass = self
+                .pixel
+                .light
+                .as_ref()
+                .expect("made with the buffer")
+                .render_pass
+                .raw_miniquad_id();
+            let (lights, burning) = (&mut self.lights, &self.fields.burning);
+            with_gl(|ctx| lights.update(ctx, f.cur, burning, cam.view_rect(10.0), f.time));
+            in_buffer(
+                light_pass,
+                PassAction::clear_color(0.0, 0.0, 0.0, 1.0),
+                |ctx| lights.draw(ctx, &view),
+            );
+            stats.lights = lights.len();
+        }
+
+        // Composite to the screen.
+        set_default_camera();
         {
             let px = &self.pixel;
             with_gl(|ctx| {

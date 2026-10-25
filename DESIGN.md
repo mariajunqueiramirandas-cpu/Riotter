@@ -801,6 +801,7 @@ The snapshot is **written in `stable_id` order**: it gathers through `slot_of`, 
 - **Animation timing.** Frames come from `stride`, which is simulation data. Purely cosmetic motion (breathing, flags waving, hair) runs on the render clock and never feeds back.
 - **Effects.** Gas is drawn from the gas layer as a smooth texture (GPU bilinear filtering), its translucency quantized and ordered-dithered on the world's pixel grid, plus particles. Fire and water cannon are particles drawn as pixel blobs.
 - **Shadows.** Buildings, walls, trees, props, vehicles and people cast shadows towards the south-east. All shadows are drawn at one depth with a less-than test, so where they overlap they darken once.
+- **Time of day.** The composite grades colour by the clock: warm at dusk, dark blue at night. At dusk and night street lamps, fires, molotovs and police light bars draw pools of light into a light buffer, and the scene is lit by the day's light plus that buffer.
 - **Debug overlays** draw field layers (density, fear, gas, messages) and contact pressure as heatmaps. These are the main tool for tuning emergent behaviour.
 
 ### 18.3 Technology

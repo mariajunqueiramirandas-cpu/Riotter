@@ -114,7 +114,8 @@ one above it.
 - **Light**: shadows swept from buildings, trees, props, vehicles and people
   towards the south-east, depth-tested so overlapping shadows never darken
   twice; dithered gas and smoke; pixel flames and spray; a colour grade for
-  the time of day.
+  the time of day, and at night pools of light from street lamps, fires,
+  molotovs and police light bars.
 
 ## Tests and checks
 

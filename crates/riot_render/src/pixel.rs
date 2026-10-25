@@ -13,7 +13,9 @@
 //!
 //! The buffer has a depth attachment, used only by shadows: every shadow is
 //! drawn at the same depth with a less-than test, so overlapping shadows
-//! never darken twice.
+//! never darken twice. A second buffer of the same size holds the light of
+//! lamps and fires at night ([`crate::lights`]); the composite lights the
+//! scene with it and the time of day's colour grade.
 
 use macroquad::miniquad::*;
 use macroquad::prelude::{Camera2D, FilterMode, Rect, RenderTarget, RenderTargetParams, vec2};
@@ -109,15 +111,25 @@ fn buffer_size(sw: f32, sh: f32) -> (u32, u32) {
 struct Uniforms {
     /// Buffer pixel at the screen's top-left and bottom-right corners.
     src: [f32; 4],
-    /// Buffer width, height, screen pixels per buffer pixel, unused.
+    /// Buffer width, height, screen pixels per buffer pixel, strength of
+    /// the light buffer.
     size: [f32; 4],
     /// Colour grade: multiply (rgb) and saturation (a).
     grade: [f32; 4],
 }
 
+/// How much the light buffer adds for a colour grade: nothing by day, most
+/// of it at night.
+pub fn light_strength(grade: [f32; 4]) -> f32 {
+    let lum = grade[0] * 0.299 + grade[1] * 0.587 + grade[2] * 0.114;
+    ((1.0 - lum) * 2.6).clamp(0.0, 1.0)
+}
+
 /// The offscreen buffer and the composite pass.
 pub struct PixelBuffer {
     pub target: Option<RenderTarget>,
+    /// Light at night ([`crate::lights`]), the same size, no depth.
+    pub light: Option<RenderTarget>,
     size: (u32, u32),
     pipeline: Pipeline,
     quad_vb: BufferId,
@@ -144,7 +156,7 @@ impl PixelBuffer {
                     fragment: FRAGMENT,
                 },
                 ShaderMeta {
-                    images: vec!["buf".to_string()],
+                    images: vec!["buf".to_string(), "light".to_string()],
                     uniforms: UniformBlockLayout {
                         uniforms: vec![
                             UniformDesc::new("src", UniformType::Float4),
@@ -163,6 +175,7 @@ impl PixelBuffer {
         );
         PixelBuffer {
             target: None,
+            light: None,
             size: (0, 0),
             pipeline,
             quad_vb,
@@ -185,6 +198,16 @@ impl PixelBuffer {
             );
             rt.texture.set_filter(FilterMode::Linear);
             self.target = Some(rt);
+            let light = macroquad::prelude::render_target_ex(
+                size.0,
+                size.1,
+                RenderTargetParams {
+                    sample_count: 1,
+                    depth: false,
+                },
+            );
+            light.texture.set_filter(FilterMode::Linear);
+            self.light = Some(light);
             self.size = size;
         }
         self.target.as_ref().expect("created above")
@@ -199,7 +222,9 @@ impl PixelBuffer {
         screen: &Camera,
         grade: [f32; 4],
     ) {
-        let Some(rt) = &self.target else { return };
+        let (Some(rt), Some(light)) = (&self.target, &self.light) else {
+            return;
+        };
         // Buffer pixels (y down) of the screen's corners.
         let to_buf = |s: macroquad::prelude::Vec2| {
             let w = screen.screen_to_world(s);
@@ -210,13 +235,21 @@ impl PixelBuffer {
         let bindings = Bindings {
             vertex_buffers: vec![self.quad_vb],
             index_buffer: self.quad_ib,
-            images: vec![rt.texture.raw_miniquad_id()],
+            images: vec![
+                rt.texture.raw_miniquad_id(),
+                light.texture.raw_miniquad_id(),
+            ],
         };
         ctx.apply_pipeline(&self.pipeline);
         ctx.apply_bindings(&bindings);
         ctx.apply_uniforms(UniformsSource::table(&Uniforms {
             src: [a.x, a.y, b.x, b.y],
-            size: [view.cam.screen.x, view.cam.screen.y, view.scale, 0.0],
+            size: [
+                view.cam.screen.x,
+                view.cam.screen.y,
+                view.scale,
+                light_strength(grade),
+            ],
             grade,
         }));
         ctx.draw(0, 6, 1);
@@ -242,6 +275,7 @@ precision mediump float;
 #endif
 varying vec2 v_px;
 uniform sampler2D buf;
+uniform sampler2D light;
 uniform vec4 size;
 uniform vec4 grade;
 void main() {
@@ -253,9 +287,14 @@ void main() {
     float r = 0.5 - 0.5 / scale;
     vec2 f = (s - clamp(s, -r, r)) * scale + 0.5;
     vec2 t = fl + f;
-    vec3 c = texture2D(buf, vec2(t.x / size.x, 1.0 - t.y / size.y)).rgb;
+    vec2 uv = vec2(t.x / size.x, 1.0 - t.y / size.y);
+    vec3 c = texture2D(buf, uv).rgb;
     float l = dot(c, vec3(0.299, 0.587, 0.114));
-    c = mix(vec3(l), c, grade.a) * grade.rgb;
+    c = mix(vec3(l), c, grade.a);
+    // The day's light, plus lamps and fires at night: they light the
+    // scene in its own colours and glow a little themselves.
+    vec3 lit = texture2D(light, uv).rgb * size.w;
+    c = c * (grade.rgb + lit) + lit * 0.1;
     gl_FragColor = vec4(c, 1.0);
 }
 "#;

@@ -622,6 +622,15 @@ pub fn build_roofs(map: &MapDef, detail: bool, decals: &DecalAtlas) -> MeshBuild
             SolidKind::Water => {}
         }
     }
+    if detail {
+        // Street lamps: a dark head with a pale lens.
+        for l in crate::lights::street_lamps(map) {
+            m.mat(rl::LINES, Mat::Solid)
+                .disc(l.pos, 0.2, [44, 46, 52, 255]);
+            m.mat(rl::CANOPY_LINES, Mat::Solid)
+                .disc(l.pos, 0.1, [250, 236, 190, 255]);
+        }
+    }
     for (i, o) in map.overhead.iter().enumerate() {
         let h = hash(i as u32 ^ 0x77);
         if is_canopy(o) {
