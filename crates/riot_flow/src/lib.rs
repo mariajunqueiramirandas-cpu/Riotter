@@ -141,6 +141,90 @@ pub fn record(goal: u8, tile: u32, request: bool) -> u64 {
     ((request as u64) << 63) | ((goal as u64) << 32) | tile as u64
 }
 
+/// Most records one agent chunk keeps per tick.
+const CHUNK_RECORDS: usize = 512;
+/// Never a record (bits 40..63 of a record are 0).
+const NO_RECORD: u64 = u64::MAX;
+/// Entries of the [`Records`] filter (a power of two).
+const RECORD_FILTER: usize = 128;
+
+/// One agent chunk's flow records of a tick, from steering.
+///
+/// The update needs only the set of distinct records, and that set must
+/// be exactly the one a plain list keeps: a list that takes a record
+/// unless it repeats its last one (agents are in Morton order, so repeats
+/// come in runs) until 512 are in. This follows the length and last entry
+/// that list would have, so the same records get in, but keeps each record
+/// only once, mostly (a small filter catches repeats from a few records
+/// back), so the update sorts a quarter as many.
+pub struct Records {
+    list: Vec<u64>,
+    /// The plain list's last record and length.
+    last: u64,
+    len: usize,
+    /// Direct-mapped by a hash of the record: a record found here is in
+    /// `list`.
+    seen: [u64; RECORD_FILTER],
+}
+
+impl Default for Records {
+    fn default() -> Self {
+        Records {
+            list: Vec::with_capacity(CHUNK_RECORDS),
+            last: NO_RECORD,
+            len: 0,
+            seen: [NO_RECORD; RECORD_FILTER],
+        }
+    }
+}
+
+impl Records {
+    /// Every record that got in, at least once, in no particular order.
+    pub fn as_slice(&self) -> &[u64] {
+        &self.list
+    }
+
+    pub fn clear(&mut self) {
+        self.list.clear();
+        self.last = NO_RECORD;
+        self.len = 0;
+        self.seen.fill(NO_RECORD);
+    }
+}
+
+/// Where [`sample_flow`] puts its records.
+pub trait RecordSink {
+    fn push_record(&mut self, r: u64);
+}
+
+impl RecordSink for Records {
+    #[inline(always)]
+    fn push_record(&mut self, r: u64) {
+        if r == self.last || self.len >= CHUNK_RECORDS {
+            return;
+        }
+        self.last = r;
+        self.len += 1;
+        let h = (r.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 57) as usize & (RECORD_FILTER - 1);
+        if self.seen[h] != r {
+            self.seen[h] = r;
+            // `list` is no longer than the plain list, so it never grows.
+            self.list.push(r);
+        }
+    }
+}
+
+/// The plain list: a record unless it repeats the last one, while there is
+/// room.
+impl RecordSink for Vec<u64> {
+    #[inline(always)]
+    fn push_record(&mut self, r: u64) {
+        if self.last() != Some(&r) && self.len() < self.capacity() {
+            self.push(r);
+        }
+    }
+}
+
 pub struct FlowSystem {
     pub goals: Vec<Goal>,
     pub page_cost: Vec<u32>,
@@ -175,7 +259,7 @@ pub struct FlowSystem {
     heap: BinaryHeap<Reverse<(u32, u32)>>,
     merged: Vec<u64>,
     /// Requests and usage from steering, one buffer per agent chunk.
-    pub records: Vec<Vec<u64>>,
+    pub records: Vec<Records>,
     pub stats: FlowStats,
 }
 
@@ -334,8 +418,8 @@ impl FlowSystem {
                 })
                 .collect(),
             heap: BinaryHeap::with_capacity(map.rnodes.len() * 8 + 64),
-            merged: Vec::with_capacity(agent_chunks * 512),
-            records: (0..agent_chunks).map(|_| Vec::with_capacity(512)).collect(),
+            merged: Vec::with_capacity(agent_chunks * CHUNK_RECORDS),
+            records: (0..agent_chunks).map(|_| Records::default()).collect(),
             stats: FlowStats::default(),
         }
     }
@@ -571,7 +655,7 @@ impl FlowSystem {
         // 2. Merge records from all chunks, in chunk order.
         self.merged.clear();
         for r in &mut self.records {
-            self.merged.extend_from_slice(r);
+            self.merged.extend_from_slice(r.as_slice());
             r.clear();
         }
         self.merged.sort_unstable();
@@ -1830,7 +1914,13 @@ pub enum FlowSample {
 /// Bilinear sample of goal `g`'s flow at `p` (DESIGN §9 sampling). Pushes a
 /// usage record, or a request when a tile is missing or stale, into `rec`
 /// (deduplicated against the last record, since agents are in Morton order).
-pub fn sample_flow(fs: &FlowSystem, map: &Map, g: u8, p: Vec2, rec: &mut Vec<u64>) -> FlowSample {
+pub fn sample_flow(
+    fs: &FlowSystem,
+    map: &Map,
+    g: u8,
+    p: Vec2,
+    rec: &mut impl RecordSink,
+) -> FlowSample {
     let (fx, fy) = map.nav.to_cell_f(p.x, p.y);
     let (fx, fy) = (fx - 0.5, fy - 0.5);
     let (x0, y0) = (fx.floor(), fy.floor());
@@ -1845,16 +1935,16 @@ pub fn sample_flow(fs: &FlowSystem, map: &Map, g: u8, p: Vec2, rec: &mut Vec<u64
         let t = map.tile_index(cx >> 4, cy >> 4);
         let s = match fs.lookup(map, g, t) {
             Lookup::Ready(s) => {
-                push_record(rec, record(g, t, false));
+                rec.push_record(record(g, t, false));
                 s
             }
             Lookup::Stale(s) => {
-                push_record(rec, record(g, t, true));
+                rec.push_record(record(g, t, true));
                 s
             }
             Lookup::Missing => {
                 if map.tiles[t as usize] != BLOCKED {
-                    push_record(rec, record(g, t, true));
+                    rec.push_record(record(g, t, true));
                 }
                 return sample_tail(fs, map, g, p, Vec2::ZERO, false, false);
             }
@@ -1902,13 +1992,6 @@ pub fn sample_flow(fs: &FlowSystem, map: &Map, g: u8, p: Vec2, rec: &mut Vec<u64
     sample_flow_general(fs, map, g, p, rec, fx, fy, x0, y0, wx, wy)
 }
 
-#[inline]
-fn push_record(rec: &mut Vec<u64>, r: u64) {
-    if rec.last() != Some(&r) && rec.len() < rec.capacity() {
-        rec.push(r);
-    }
-}
-
 #[inline(always)]
 fn sample_tail(
     fs: &FlowSystem,
@@ -1950,7 +2033,7 @@ fn sample_flow_general(
     map: &Map,
     g: u8,
     p: Vec2,
-    rec: &mut Vec<u64>,
+    rec: &mut impl RecordSink,
     fx: f32,
     fy: f32,
     x0: i32,
@@ -1995,7 +2078,7 @@ impl Corners {
         fs: &FlowSystem,
         map: &Map,
         g: u8,
-        rec: &mut Vec<u64>,
+        rec: &mut impl RecordSink,
         cx: i32,
         cy: i32,
         w: f32,
@@ -2010,16 +2093,16 @@ impl Corners {
             self.last_tile = t;
             self.last_slot = match fs.lookup(map, g, t) {
                 Lookup::Ready(s) => {
-                    push_record(rec, record(g, t, false));
+                    rec.push_record(record(g, t, false));
                     Some(s)
                 }
                 Lookup::Stale(s) => {
-                    push_record(rec, record(g, t, true));
+                    rec.push_record(record(g, t, true));
                     Some(s)
                 }
                 Lookup::Missing => {
                     if map.tiles[t as usize] != BLOCKED {
-                        push_record(rec, record(g, t, true));
+                        rec.push_record(record(g, t, true));
                     }
                     None
                 }
@@ -2147,7 +2230,9 @@ mod tests {
         for tick in 0..ticks {
             rec.clear();
             let s = sample_flow(fs, map, g, p, &mut rec);
-            fs.records[0].extend_from_slice(&rec);
+            for &r in &rec {
+                fs.records[0].push_record(r);
+            }
             fs.update(map, fields, &tun, tick);
             match s {
                 FlowSample::Dir(d) => {
@@ -2417,6 +2502,40 @@ mod tests {
             assert_eq!(items, [1]);
             q.put(b, items);
             assert_eq!(q.skip(from), None);
+        }
+    }
+
+    #[test]
+    fn records_keep_the_plain_lists_set() {
+        // The same distinct records as a list that skips repeats of its
+        // last entry and stops at 512, whatever the order of arrival.
+        for seed in 0..40u64 {
+            let mut plain: Vec<u64> = Vec::with_capacity(CHUNK_RECORDS);
+            let mut recs = Records::default();
+            let mut x = seed + 1;
+            let n = 200 + seed as usize * 60;
+            for _ in 0..n {
+                x = riot_core::rng::mix(x);
+                let r = record(
+                    (x % 3) as u8,
+                    (x >> 20) as u32 % (5 + seed as u32 * 7),
+                    x & 64 != 0,
+                );
+                for _ in 0..1 + (x >> 50) % 3 {
+                    plain.push_record(r);
+                    recs.push_record(r);
+                }
+            }
+            let mut a = plain.clone();
+            let mut b = recs.as_slice().to_vec();
+            a.sort_unstable();
+            a.dedup();
+            b.sort_unstable();
+            b.dedup();
+            assert_eq!(a, b, "seed {seed}");
+            assert!(recs.as_slice().len() <= plain.len());
+            recs.clear();
+            assert!(recs.as_slice().is_empty());
         }
     }
 }

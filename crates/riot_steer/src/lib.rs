@@ -14,7 +14,9 @@ use riot_defs::state::{Action, Gait, aux, emo, flag, health, intent, pose, stat}
 use riot_defs::targets::{Objective, SupplyDrop};
 use riot_defs::tunables::Tunables;
 use riot_fields::{Fields, Layer, field_cell_pos};
-use riot_flow::{FlowSample, FlowSystem, GOAL_EXITS, GOAL_MEDIC, GOAL_WATER, NO_GOAL, sample_flow};
+use riot_flow::{
+    FlowSample, FlowSystem, GOAL_EXITS, GOAL_MEDIC, GOAL_WATER, NO_GOAL, Records, sample_flow,
+};
 use riot_map::Map;
 use riot_people::People;
 use riot_spatial::Spatial;
@@ -52,7 +54,7 @@ pub fn steer(
     p: &mut People,
     old_vx: &[f32],
     old_vy: &[f32],
-    records: &mut [Vec<u64>],
+    records: &mut [Records],
     cx: &SteerCtx,
 ) {
     let len = p.len;
@@ -121,7 +123,7 @@ pub fn steer(
 
                 let mut desired = Vec2::ZERO;
                 let mut face: Option<Vec2> = None;
-                let route = |g: u8, rec: &mut Vec<u64>, fallback: Vec2| -> Option<Vec2> {
+                let route = |g: u8, rec: &mut Records, fallback: Vec2| -> Option<Vec2> {
                     if g == NO_GOAL {
                         return None;
                     }
