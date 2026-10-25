@@ -94,6 +94,77 @@ fn any_bits(v: &[f32]) -> bool {
     v.iter().fold(0u32, |b, &x| b | x.to_bits()) != 0
 }
 
+// ---------------------------------------------------------------------------
+// Subnormal-proof products
+//
+// Decaying layers fill with subnormal floats (below 2^-126). An f32
+// multiplication that reads or makes one takes a microcode assist, some fifty
+// times slower than the multiplication; additions, comparisons and
+// conversions between f32 and f64 take none (measured on the x86-64 servers
+// this runs on). The values are state, so they cannot be flushed. But the
+// f64 product of two f32 values is exact (24 + 24 bits, and far from the
+// f64 limits), and converting it to f32 rounds the exact product once, as
+// the f32 multiplication does, subnormal results included: [`mul_w`] gives
+// the same bits as `*` on any IEEE-754 machine, and such small values are
+// normal f64 numbers. The passes over a layer take this path for the rows
+// that hold tiny values.
+
+/// A value below this, 2^-72 (and not zero), sends its row down the f64
+/// path. From larger values and weights of at least [`TINY_WEIGHT`], the
+/// f32 path makes nothing below 2^-126 (a row pass, a column pass, the
+/// decay and the open mask take 2^-52 at most), unless signs cancel.
+const TINY: f32 = f32::from_bits((127 - 72) << 23);
+
+/// A weight this small, 2^-24 (and not zero), sends every row down the f64
+/// path.
+const TINY_WEIGHT: f32 = f32::from_bits((127 - 24) << 23);
+
+/// `x * k` in f64, for a `k` from [`wide`]: exactly the f32 product.
+#[inline(always)]
+fn mul_w(x: f32, k: f64) -> f32 {
+    (x as f64 * k) as f32
+}
+
+/// A weight for [`mul_w`]. Hidden from the optimizer, which would otherwise
+/// see two widened f32 factors and shrink the product back to f32 (the same
+/// value, with the assist).
+#[inline]
+fn wide(k: f32) -> f64 {
+    std::hint::black_box(k as f64)
+}
+
+/// Some value is not zero but smaller than [`TINY`].
+#[inline]
+fn any_tiny(v: &[f32]) -> bool {
+    let lim = TINY.to_bits() - 1;
+    v.iter().fold(u32::MAX, |m, &x| {
+        m.min((x.to_bits() & 0x7fff_ffff).wrapping_sub(1))
+    }) < lim
+}
+
+/// Some weight is not zero but smaller than [`TINY_WEIGHT`].
+fn tiny_weight(w: &[f32]) -> bool {
+    w.iter().any(|&k| k != 0.0 && k.abs() < TINY_WEIGHT)
+}
+
+/// `v *= k` over a layer, with the f64 products on rows that hold tiny
+/// values (`kw` is `wide(k)`).
+#[inline]
+fn decay_rows(v: &mut [f32], k: f32, kw: f64) {
+    let all_wide = tiny_weight(&[k]);
+    for row in rows_mut(v) {
+        if all_wide || any_tiny(row) {
+            for x in row.iter_mut() {
+                *x = mul_w(*x, kw);
+            }
+        } else {
+            for x in row.iter_mut() {
+                *x *= k;
+            }
+        }
+    }
+}
+
 pub struct Fields {
     pub geom: GridGeom,
     pub cdim: u32,
@@ -105,6 +176,9 @@ pub struct Fields {
     /// `pool × LAYERS × CL` floats: slot-major, then layer, then row-major cell.
     pub data: Vec<f32>,
     pub tmp: Vec<f32>,
+    /// Per slot (and fused layer) of `tmp`, bit `y`: row `y` of the row pass
+    /// read a tiny value, so the column pass takes f64 products near it.
+    tmp_tiny: Vec<u64>,
     /// Message layer (DESIGN §13), `fidelity << 8 | id`, and its scratch.
     pub msg: Vec<u16>,
     pub msg_tmp: Vec<u16>,
@@ -148,6 +222,7 @@ impl Fields {
             free: (0..pool as u16).rev().collect(),
             data: vec![0.0; pool * LAYERS * CL],
             tmp: vec![0.0; pool * FUSED * CL],
+            tmp_tiny: vec![0; pool * FUSED],
             msg: vec![0; pool * CL],
             msg_tmp: vec![0; pool * CL],
             idle: vec![0; pool],
@@ -435,6 +510,7 @@ impl Fields {
         if threat_tick && (0.0 * t_decay).to_bits() != 0 {
             always |= bit(Layer::Threat);
         }
+        let (keep_w, t_decay_w) = (wide(keep), wide(t_decay));
         let slot_runs = &self.slot_runs;
         let slot_chunk = &self.slot_chunk;
         self.data
@@ -467,17 +543,12 @@ impl Fields {
                 }
                 *written_n = 0;
                 if emo_tick {
-                    for ((f, a), w) in fear.iter_mut().zip(anger.iter_mut()).zip(weight.iter_mut())
-                    {
-                        *f *= keep;
-                        *a *= keep;
-                        *w *= keep;
+                    for v in [&mut *fear, &mut *anger, &mut *weight] {
+                        decay_rows(v, keep, keep_w);
                     }
                 }
                 if threat_tick {
-                    for t in threat.iter_mut() {
-                        *t *= t_decay;
-                    }
+                    decay_rows(threat, t_decay, t_decay_w);
                 }
                 let [r0, r1] = slot_runs[slot];
                 for run in &sp.runs[r0 as usize..r1 as usize] {
@@ -539,6 +610,9 @@ impl Fields {
     ) -> f32 {
         let li = l as usize;
         let open_i = Layer::Open as usize;
+        // Rows near tiny values take exact f64 products (see `mul_w`).
+        let all_wide = tiny_weight(&kx) || tiny_weight(&ky) || tiny_weight(&[decay]);
+        let (kxw, kyw, decay_w) = (kx.map(wide), ky.map(wide), wide(decay));
         {
             let data = &self.data;
             let table = &self.table;
@@ -547,8 +621,9 @@ impl Fields {
             let pool = self.pool;
             self.tmp[..pool * CL]
                 .par_chunks_mut(CL)
+                .zip(self.tmp_tiny[..pool].par_iter_mut())
                 .enumerate()
-                .for_each(|(slot, out)| {
+                .for_each(|(slot, (out, tiny))| {
                     let c = slot_chunk[slot];
                     if c == NO_CHUNK {
                         return;
@@ -567,6 +642,7 @@ impl Fields {
                     let right = nb(1).map(|s| rows(&data[(s * LAYERS + li) * CL..][..CL]));
                     let out = rows_mut(out);
                     let mut row = [0.0f32; CC + 4];
+                    let mut t = 0u64;
                     for y in 0..CC {
                         row[2..CC + 2].copy_from_slice(&me[y]);
                         row[0] = left.map_or(0.0, |l| l[y][CC - 2]);
@@ -574,17 +650,30 @@ impl Fields {
                         row[CC + 2] = right.map_or(0.0, |r| r[y][0]);
                         row[CC + 3] = right.map_or(0.0, |r| r[y][1]);
                         let o = &mut out[y];
-                        for x in 0..CC {
-                            o[x] = kx[0] * row[x]
-                                + kx[1] * row[x + 1]
-                                + kx[2] * row[x + 2]
-                                + kx[3] * row[x + 3]
-                                + kx[4] * row[x + 4];
+                        if all_wide || any_tiny(&row) {
+                            for x in 0..CC {
+                                o[x] = mul_w(row[x], kxw[0])
+                                    + mul_w(row[x + 1], kxw[1])
+                                    + mul_w(row[x + 2], kxw[2])
+                                    + mul_w(row[x + 3], kxw[3])
+                                    + mul_w(row[x + 4], kxw[4]);
+                            }
+                        } else {
+                            for x in 0..CC {
+                                o[x] = kx[0] * row[x]
+                                    + kx[1] * row[x + 1]
+                                    + kx[2] * row[x + 2]
+                                    + kx[3] * row[x + 3]
+                                    + kx[4] * row[x + 4];
+                            }
                         }
+                        t |= (any_tiny(o) as u64) << y;
                     }
+                    *tiny = t;
                 });
         }
         let tmp = &self.tmp;
+        let tmp_tiny = &self.tmp_tiny;
         let table = &self.table;
         let slot_chunk = &self.slot_chunk;
         let cdim = self.cdim;
@@ -606,17 +695,22 @@ impl Fields {
                     let s = table[(y as u32 * cdim + cx) as usize];
                     if s == NO_SLOT { None } else { Some(s as usize) }
                 };
+                let (up, down) = (nb(-1), nb(1));
                 let me = rows(&tmp[slot * CL..][..CL]);
-                let up = nb(-1).map(|s| rows(&tmp[s * CL..][..CL]));
-                let down = nb(1).map(|s| rows(&tmp[s * CL..][..CL]));
+                let above = up.map(|s| rows(&tmp[s * CL..][..CL]));
+                let below = down.map(|s| rows(&tmp[s * CL..][..CL]));
+                // Tiny rows of the column window: bit `y + 2` is row `y`.
+                let tiny = (up.map_or(0, |s| tmp_tiny[s] >> (CC - 2)) as u128)
+                    | (tmp_tiny[slot] as u128) << 2
+                    | (down.map_or(0, |s| tmp_tiny[s] & 3) as u128) << (CC + 2);
                 let zero = [0.0f32; CC];
                 // Row `y` of the row pass, from the chunks above and below
                 // past the edges (zeros where they are inactive).
                 let row = |y: i32| -> &[f32; CC] {
                     if y < 0 {
-                        up.map_or(&zero, |u| &u[(CC as i32 + y) as usize])
+                        above.map_or(&zero, |u| &u[(CC as i32 + y) as usize])
                     } else if y >= CC as i32 {
-                        down.map_or(&zero, |dn| &dn[(y - CC as i32) as usize])
+                        below.map_or(&zero, |dn| &dn[(y - CC as i32) as usize])
                     } else {
                         &me[y as usize]
                     }
@@ -628,24 +722,47 @@ impl Fields {
                     let (head, tail) = d.split_at_mut(li * CL);
                     (&mut tail[..CL], &head[open_i * CL..(open_i + 1) * CL])
                 };
-                let rows_out = rows_mut(out);
+                let (out, open) = (rows_mut(out), rows(open));
                 for y in 0..CC as i32 {
                     let (a, b, c0, e, f) = (row(y - 2), row(y - 1), row(y), row(y + 1), row(y + 2));
-                    let o = &mut rows_out[y as usize];
-                    for x in 0..CC {
-                        o[x] = decay
-                            * (ky[0] * a[x]
-                                + ky[1] * b[x]
-                                + ky[2] * c0[x]
-                                + ky[3] * e[x]
-                                + ky[4] * f[x]);
+                    let o = &mut out[y as usize];
+                    let open = &open[y as usize];
+                    if all_wide || (tiny >> y) & 0x1f != 0 {
+                        for x in 0..CC {
+                            o[x] = mul_w(
+                                mul_w(a[x], kyw[0])
+                                    + mul_w(b[x], kyw[1])
+                                    + mul_w(c0[x], kyw[2])
+                                    + mul_w(e[x], kyw[3])
+                                    + mul_w(f[x], kyw[4]),
+                                decay_w,
+                            );
+                        }
+                        if mask_open {
+                            // The mask's factors are data: widen them out of
+                            // the optimizer's sight too.
+                            let ow = std::hint::black_box(open.map(|v| v as f64));
+                            for x in 0..CC {
+                                o[x] = mul_w(o[x], ow[x]);
+                            }
+                        }
+                    } else {
+                        for x in 0..CC {
+                            o[x] = decay
+                                * (ky[0] * a[x]
+                                    + ky[1] * b[x]
+                                    + ky[2] * c0[x]
+                                    + ky[3] * e[x]
+                                    + ky[4] * f[x]);
+                        }
+                        if mask_open {
+                            for x in 0..CC {
+                                o[x] *= open[x];
+                            }
+                        }
                     }
                 }
-                if mask_open {
-                    for (v, o) in out.iter_mut().zip(open) {
-                        *v *= *o;
-                    }
-                }
+                let out = out.as_flattened();
                 *live = (*live & !bit(l)) | if any_bits(out) { bit(l) } else { 0 };
                 out.iter().fold(0.0f32, |m, &v| m.max(v.abs()))
             })
@@ -658,14 +775,18 @@ impl Fields {
     pub fn blur(&mut self, layers: &[Layer], a: f32) {
         assert!(layers.len() <= FUSED);
         let c = 1.0 - 2.0 * a;
+        // Rows near tiny values take exact f64 products (see `mul_w`).
+        let all_wide = tiny_weight(&[a, c]);
+        let (aw, cw) = (wide(a), wide(c));
         let pool = self.pool;
         let cdim = self.cdim;
         {
             let (data, table, slot_chunk) = (&self.data, &self.table, &self.slot_chunk);
             self.tmp[..pool * FUSED * CL]
                 .par_chunks_mut(FUSED * CL)
+                .zip(self.tmp_tiny.par_chunks_mut(FUSED))
                 .enumerate()
-                .for_each(|(slot, out)| {
+                .for_each(|(slot, (out, tiny))| {
                     let ch = slot_chunk[slot];
                     if ch == NO_CHUNK {
                         return;
@@ -687,19 +808,29 @@ impl Fields {
                         let right = right.map(|s| rows(&data[(s * LAYERS + li) * CL..][..CL]));
                         let o = rows_mut(&mut out[j * CL..(j + 1) * CL]);
                         let mut row = [0.0f32; CC + 2];
+                        let mut t = 0u64;
                         for y in 0..CC {
                             row[1..CC + 1].copy_from_slice(&me[y]);
                             row[0] = left.map_or(0.0, |l| l[y][CC - 1]);
                             row[CC + 1] = right.map_or(0.0, |r| r[y][0]);
                             let o = &mut o[y];
-                            for x in 0..CC {
-                                o[x] = a * (row[x] + row[x + 2]) + c * row[x + 1];
+                            if all_wide || any_tiny(&row) {
+                                for x in 0..CC {
+                                    o[x] = mul_w(row[x] + row[x + 2], aw) + mul_w(row[x + 1], cw);
+                                }
+                            } else {
+                                for x in 0..CC {
+                                    o[x] = a * (row[x] + row[x + 2]) + c * row[x + 1];
+                                }
                             }
+                            t |= (any_tiny(o) as u64) << y;
                         }
+                        tiny[j] = t;
                     }
                 });
         }
-        let (tmp, table, slot_chunk) = (&self.tmp, &self.table, &self.slot_chunk);
+        let (tmp, tmp_tiny) = (&self.tmp, &self.tmp_tiny);
+        let (table, slot_chunk) = (&self.table, &self.slot_chunk);
         self.data
             .par_chunks_mut(LAYERS * CL)
             .zip(self.live.par_iter_mut())
@@ -726,14 +857,24 @@ impl Fields {
                         up.map_or(&zero, |s| &rows(&tmp[(s * FUSED + j) * CL..][..CL])[CC - 1]);
                     let below =
                         down.map_or(&zero, |s| &rows(&tmp[(s * FUSED + j) * CL..][..CL])[0]);
+                    // Tiny rows of the column window: bit `y + 1` is row `y`.
+                    let tiny = (up.map_or(0, |s| tmp_tiny[s * FUSED + j] >> (CC - 1)) as u128)
+                        | (tmp_tiny[slot * FUSED + j] as u128) << 1
+                        | (down.map_or(0, |s| tmp_tiny[s * FUSED + j] & 1) as u128) << (CC + 1);
                     let out = rows_mut(&mut d[l as usize * CL..(l as usize + 1) * CL]);
                     for y in 0..CC {
                         let r0 = if y > 0 { &me[y - 1] } else { above };
                         let r1 = &me[y];
                         let r2 = if y + 1 < CC { &me[y + 1] } else { below };
                         let o = &mut out[y];
-                        for x in 0..CC {
-                            o[x] = a * (r0[x] + r2[x]) + c * r1[x];
+                        if all_wide || (tiny >> y) & 7 != 0 {
+                            for x in 0..CC {
+                                o[x] = mul_w(r0[x] + r2[x], aw) + mul_w(r1[x], cw);
+                            }
+                        } else {
+                            for x in 0..CC {
+                                o[x] = a * (r0[x] + r2[x]) + c * r1[x];
+                            }
                         }
                     }
                     let out = out.as_flattened();
@@ -951,6 +1092,15 @@ fn bilerp([a, b, c, d]: [f32; 4], tx: f32, ty: f32) -> f32 {
     top + (bot - top) * ty
 }
 
+/// [`bilerp`] with exact f64 products, for weights from [`wide`]: the same
+/// bits.
+#[inline(always)]
+fn bilerp_w([a, b, c, d]: [f32; 4], tx: f64, ty: f64) -> f32 {
+    let top = a + mul_w(b - a, tx);
+    let bot = c + mul_w(d - c, tx);
+    top + mul_w(bot - top, ty)
+}
+
 /// Floats from a cell of layer 0 to the cell below and right of it in the
 /// last layer: the four corners of a fast probe in every layer.
 const WINDOW: usize = (LAYERS - 1) * CL + CC + 2;
@@ -1085,20 +1235,28 @@ pub fn absorb(f: &Fields, p: &mut People, sp: &Spatial, ap: &AbsorbParams) -> Ab
                     live = u16::MAX;
                 }
                 match cells {
-                    Cells::Window(w) => react(
-                        |l| {
+                    Cells::Window(w) => {
+                        // Exact f64 products (see `mul_w`): where the crowd
+                        // has gone, the layers decay into subnormals.
+                        let (txw, tyw) = std::hint::black_box((tx as f64, ty as f64));
+                        let at = |l: Layer| {
                             let o = l as usize * CL;
-                            bilerp([w[o], w[o + 1], w[o + CC], w[o + CC + 1]], tx, ty)
-                        },
-                        live,
-                        e,
-                        st,
-                        speed2,
-                        id,
-                        ap,
-                        &mut out,
-                    ),
+                            [w[o], w[o + 1], w[o + CC], w[o + CC + 1]]
+                        };
+                        react(
+                            DENSE.map(at).map(|c| bilerp_w(c, txw, tyw)),
+                            |l| bilerp_w(at(l), txw, tyw),
+                            live,
+                            e,
+                            st,
+                            speed2,
+                            id,
+                            ap,
+                            &mut out,
+                        )
+                    }
                     cells => react(
+                        DENSE.map(|l| cells.get(f, l, tx, ty)),
                         |l| cells.get(f, l, tx, ty),
                         live,
                         e,
@@ -1115,11 +1273,16 @@ pub fn absorb(f: &Fields, p: &mut People, sp: &Spatial, ap: &AbsorbParams) -> Ab
         .reduce(AbsorbHarm::default, AbsorbHarm::add)
 }
 
-/// One agent of [`absorb`]: `get(l)` is the bilinear sample of layer `l` at
-/// its position, which is +0.0 for the sparse layers (gas, fire, chants)
-/// whose bit in `live` is clear; `speed2` is its squared speed.
+/// The layers absorb reads for everyone, sampled together.
+const DENSE: [Layer; 4] = [Layer::Weight, Layer::Threat, Layer::Fear, Layer::Anger];
+
+/// One agent of [`absorb`]: `dense` and `get(l)` are the bilinear samples of
+/// the [`DENSE`] layers and of layer `l` at its position; `get` is not asked
+/// for the sparse layers (gas, fire, chants) whose bit in `live` is clear,
+/// which sample +0.0. `speed2` is its squared speed.
 #[inline(always)]
 fn react(
+    dense: [f32; 4],
     get: impl Fn(Layer) -> f32,
     live: u16,
     e: &mut [u8; 4],
@@ -1139,32 +1302,36 @@ fn react(
     let mut harm = 0.0;
     let mut gas_harm = 0.0;
     let sparse = |l: Layer| if live & bit(l) == 0 { 0.0 } else { get(l) };
-    let w = get(Layer::Weight);
-    let threat = (get(Layer::Threat) * 0.1).min(1.0);
+    let [w, threat, fear_field, anger_field] = dense;
+    // Products of samples: exact f64 products when one is tiny (see
+    // `mul_w`), which is rare enough to keep the f32 ones otherwise.
+    let tiny = any_tiny(&dense);
+    let mul = |a: f32, b: f32| if tiny { mul_w(a, wide(b)) } else { a * b };
+    let threat = mul(threat, 0.1).min(1.0);
     if !officer {
         if w > 0.05 {
             let inv = 1.0 / w;
-            let ff = get(Layer::Fear) * inv;
-            let fa = get(Layer::Anger) * inv;
-            fear += tun.contagion_fear * (ff - fear);
+            let ff = mul(fear_field, inv);
+            let fa = mul(anger_field, inv);
+            fear += mul(tun.contagion_fear, ff - fear);
             // Anger catches more easily than it calms.
             let ka = if fa > anger {
                 tun.contagion_anger
             } else {
                 tun.contagion_anger * 0.3
             };
-            anger += ka * (fa - anger);
+            anger += mul(ka, fa - anger);
         }
         let chant = sparse(Layer::Chant);
         morale += tun.chant_morale * chant.min(2.0);
         fear -= 0.5 * tun.chant_morale * chant.min(2.0);
         // Police and violence nearby: the timid fear it, the willing are angered.
-        fear += tun.threat_fear * threat * (1.0 - a.violence);
-        anger += tun.threat_anger * threat * (a.violence + 0.1);
+        fear += mul(mul(tun.threat_fear, threat), 1.0 - a.violence);
+        anger += mul(mul(tun.threat_anger, threat), a.violence + 0.1);
     } else if w > 0.05 {
         // A hostile crowd frightens officers.
-        let hostile = get(Layer::Anger) / w * (w * 0.25).min(1.0);
-        fear += tun.threat_fear * 0.5 * hostile * (1.0 - a.violence);
+        let hostile = mul(anger_field / w, (w * 0.25).min(1.0));
+        fear += mul(mul(tun.threat_fear * 0.5, hostile), 1.0 - a.violence);
     }
     let gas = sparse(Layer::Gas);
     if gas > 0.01 {
@@ -1246,5 +1413,67 @@ mod tests {
             assert!((sum - 1.0).abs() < 1e-6, "{s}: {k:?}");
         }
         assert_eq!(blur_shift_kernel(0.2, 0.0), blur_kernel(0.2));
+    }
+
+    /// The f64 path must give the f32 product's bits for every pair of
+    /// floats, subnormal factors and results included.
+    #[test]
+    fn wide_products_are_the_f32_products() {
+        let mut s = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s as u32
+        };
+        let check = |a: f32, b: f32| {
+            let (p, q) = (a * b, mul_w(a, wide(b)));
+            assert!(
+                p.to_bits() == q.to_bits() || p.is_nan() && q.is_nan(),
+                "{a:e} * {b:e}: {p:e} vs {q:e}"
+            );
+        };
+        for _ in 0..300_000 {
+            // Any two floats; a subnormal times a weight below 2; two
+            // small normals whose product is subnormal or rounds to zero.
+            check(f32::from_bits(next()), f32::from_bits(next()));
+            check(
+                f32::from_bits(next() & 0x807f_ffff),
+                f32::from_bits(next() & 0xbfff_ffff),
+            );
+            check(
+                f32::from_bits(next() & 0x9fff_ffff),
+                f32::from_bits(next() & 0x9fff_ffff),
+            );
+        }
+        for a in [
+            0.0f32,
+            -0.0,
+            f32::MIN_POSITIVE,
+            1e-45,
+            -1e-45,
+            f32::MAX,
+            f32::INFINITY,
+        ] {
+            for b in [0.0f32, -0.0, 0.5, 0.75, -1.0, 2.0, f32::MAX] {
+                check(a, b);
+            }
+        }
+    }
+
+    #[test]
+    fn tiny_values() {
+        assert!(!any_tiny(&[
+            0.0,
+            -0.0,
+            1.0,
+            TINY,
+            -TINY,
+            f32::NAN,
+            f32::INFINITY
+        ]));
+        assert!(any_tiny(&[1.0, 1e-30]));
+        assert!(any_tiny(&[-1e-40, 0.0]));
+        assert!(any_tiny(&[f32::from_bits(1)]));
     }
 }
