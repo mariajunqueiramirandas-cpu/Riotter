@@ -1,0 +1,14 @@
+[package]
+name = "riot_render"
+description = "Snapshots → GPU: debug view and instanced layered sprites."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+riot_sim.workspace = true
+macroquad.workspace = true
+
+[lints]
+workspace = true

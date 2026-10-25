@@ -1,0 +1,64 @@
+// A long day on the 8 km city (DESIGN §2.8): a morning trickle through the
+// metro, a lunchtime bus crowd, the after-work surge, and radicals arriving
+// after dark. The state shuts the internet down at nine; police
+// reinforcements roll in through the afternoon. 14 hours of game time.
+(
+    title: "A day in the city",
+    description: "From a morning trickle to riots after dark, with an internet shutdown at 21:00.",
+    map: "generated:city?size=8192&seed=3",
+    tunables: "../tunables.ron",
+    seed: 2024,
+    start: "09:00",
+    duration: "14:00",
+
+    crowd: {
+        "student": 8000,
+        "worker": 10000,
+        "elder": 3000,
+        "radical": 4000,
+        "provocateur": 200,
+        "journalist": 300,
+        "bystander": 4500,
+    },
+    organizers: 40,
+    arrivals: [
+        // Morning: a trickle through every metro station, older and calmer.
+        (entry: "metro_*", from: "09:00", to: "12:00", share: 1.0,
+            bias: { "elder": 2.0, "radical": 0.2, "provocateur": 0.2 }),
+        // Lunchtime: bus stops.
+        (entry: "bus_*", from: "12:00", to: "14:00", share: 0.5),
+        // After work: the surge, by metro and on foot from the edges.
+        (entry: "metro_*", from: "17:00", to: "19:30", share: 3.0,
+            bias: { "worker": 2.0, "student": 1.5 }),
+        (entry: "edge_*", from: "16:30", to: "19:00", share: 0.8),
+        // After dark: radicals and provocateurs.
+        (entry: "metro_*", from: "20:30", to: "22:30", share: 1.2,
+            bias: { "radical": 8.0, "provocateur": 6.0, "elder": 0.05, "worker": 0.3, "bystander": 0.3 }),
+    ],
+    supplies: (water: 1200, medic: 300, shields: 200, barricade: 300),
+
+    police: (
+        vans_per_depot: 4,
+        water_cannons: 6,
+        aggression: 0.5,
+        squads: [
+            // A light presence at the squares from the morning.
+            (kind: Line, depot: "depot_*", staging: "staging_central_square", count: 4),
+            (kind: Line, depot: "depot_*", staging: "staging_square_*", count: 8),
+            // Reinforcements through the afternoon and evening.
+            (kind: Line, depot: "depot_*", count: 10, available: "15:00"),
+            (kind: Riot, depot: "depot_*", count: 12, available: "18:00"),
+            (kind: Snatch, officers: 8, depot: "depot_*", count: 8, available: "20:00"),
+        ],
+    ),
+    escalation_cap: MassArrests,
+    comms: (mode: Phones, shutdown_at: "21:00"),
+    weather: (wind: (2.0, -0.5), heat: 0.6, dusk: "20:30"),
+
+    objectives: [
+        (name: "Gather at the square", kind: MarchTo, area: "central_square", announced: true, stance: Peaceful),
+        (name: "Occupy parliament's doorstep", kind: Hold, area: "government_quarter", weight: 2.0, stance: Defensive),
+        (name: "Hold the river crossing", kind: Hold, area: "bridge_12", weight: 0.5, stance: Defensive),
+    ],
+    limits: (field_chunks: 384, flow_tiles: 49152),
+)

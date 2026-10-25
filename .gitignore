@@ -1,0 +1,6 @@
+/target
+*.csv
+!data/**/*.csv
+/out
+/.claude/
+/data/maps/city.json

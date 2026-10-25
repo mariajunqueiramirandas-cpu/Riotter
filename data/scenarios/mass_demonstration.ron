@@ -1,0 +1,61 @@
+// A mass demonstration on the 8 km city (the M7 stretch target): 50,000
+// people come in by metro and bus over 45 minutes, converge on the central
+// square and press on the government quarter. 60 squads (600 officers) from
+// six depots; gas and water allowed.
+(
+    title: "Mass demonstration",
+    description: "50,000 people converge on the central square of the 8 km city.",
+    map: "generated:city?size=8192&seed=3",
+    tunables: "../tunables.ron",
+    seed: 7,
+    start: "13:00",
+    duration: 120,
+
+    crowd: {
+        "student": 15000,
+        "worker": 18000,
+        "elder": 5000,
+        "radical": 5000,
+        "provocateur": 300,
+        "journalist": 700,
+        "bystander": 6000,
+    },
+    organizers: 50,
+    // The nine stations nearest the centre (generated maps number metro
+    // stations by distance from the centre), plus every bus stop.
+    arrivals: [
+        (entry: "metro_1", from: 0, to: 45),
+        (entry: "metro_2", from: 0, to: 45),
+        (entry: "metro_3", from: 0, to: 45),
+        (entry: "metro_4", from: 0, to: 45),
+        (entry: "metro_5", from: 0, to: 45),
+        (entry: "metro_6", from: 0, to: 45),
+        (entry: "metro_7", from: 0, to: 45),
+        (entry: "metro_8", from: 0, to: 45),
+        (entry: "metro_9", from: 0, to: 45),
+        (entry: "bus_*", from: 5, to: 45, share: 1.5),
+    ],
+    supplies: (water: 1500, medic: 400, shields: 300, barricade: 400),
+
+    police: (
+        vans_per_depot: 6,
+        water_cannons: 8,
+        aggression: 0.5,
+        squads: [
+            (kind: Line, depot: "depot_*", staging: "staging_central_square", count: 6),
+            (kind: Line, depot: "depot_*", staging: "staging_square_*", count: 18),
+            (kind: Riot, depot: "depot_*", count: 20, available: 15),
+            (kind: Snatch, officers: 8, depot: "depot_*", count: 16, available: 30),
+        ],
+    ),
+    escalation_cap: GasAndWater,
+    comms: (mode: Degraded),
+    weather: (wind: (2.5, -1.0), heat: 0.6, dusk: "20:30"),
+
+    objectives: [
+        (name: "Fill the square", kind: MarchTo, area: "central_square", announced: true, stance: Peaceful),
+        (name: "Surround parliament", kind: Hold, area: "government_quarter", announced: true, weight: 2.0, stance: Defensive),
+    ],
+    // A crowd this size covers more ground than the defaults allow for.
+    limits: (field_chunks: 320, flow_tiles: 49152),
+)

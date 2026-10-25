@@ -1,0 +1,13 @@
+[package]
+name = "riot_core"
+description = "Math, ids, RNG, lane storage and grid geometry for the riot simulation."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+bytemuck.workspace = true
+
+[lints]
+workspace = true

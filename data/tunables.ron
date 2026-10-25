@@ -1,0 +1,186 @@
+// Riotter tunables (DESIGN §19). Every tunable with its default value.
+// riot_app reloads this file while a riot runs and applies changed values
+// as SetTunable commands on the next tick. A scenario can name another
+// file that lists only some tunables. Unknown names are an error.
+{
+    // Ticks between an agent's rethinks (K).
+    "think_interval": 10.0,
+    // Ticks between spatial reorders of the agent arrays.
+    "reorder_interval": 8.0,
+    // Jacobi contact iterations per tick.
+    "contact_iters": 2.0,
+    // Contact iterations when the last tick's peak pressure was high.
+    "contact_iters_hot": 4.0,
+    // Peak pressure (0..1) that raises the contact iterations.
+    "hot_pressure": 0.35,
+    // Jacobi relaxation factor for contact push-out.
+    "contact_relax": 0.9,
+    // Push-out per contact iteration (m) → pressure (0..1).
+    "pressure_scale": 6.0,
+    // Push-out per contact iteration (m) that is just walking into people, not pressure.
+    "pressure_baseline": 0.02,
+    // Per-tick blend of measured into held pressure: a crush needs compression sustained for about half a second.
+    "pressure_smoothing": 0.125,
+    // Extra reach beyond touching when building neighbour lists (m).
+    "neighbour_skin": 0.15,
+    // Ticks of stillness before an agent sleeps.
+    "sleep_ticks": 40.0,
+    // Speed under which an agent counts as still (m/s).
+    "sleep_speed": 0.05,
+    // Ticks between a sleeper's slow-timer rethinks.
+    "wake_interval": 80.0,
+    // Overlap (m) at which an awake body wakes a sleeper.
+    "wake_push": 0.01,
+    // Ticks from requesting a flow tile to swapping it in (L).
+    "flow_latency": 10.0,
+    // Ticks between dynamic cost refreshes per goal.
+    "flow_refresh": 20.0,
+    // Route cost per person per 4 m² field cell.
+    "flow_density_cost": 6.0,
+    // Route cost per unit of gas.
+    "flow_gas_cost": 40.0,
+    // Route cost per unit of fire.
+    "flow_fire_cost": 150.0,
+    // Anticipatory avoidance strength.
+    "avoid_strength": 1.2,
+    // Time-to-collision horizon for avoidance (s).
+    "avoid_horizon": 1.6,
+    // Wall avoidance strength.
+    "wall_avoid": 0.8,
+    // Steering away from the density gradient.
+    "density_avoid": 0.08,
+    // Fraction of an objective's radius people hold inside.
+    "hold_radius": 0.6,
+    // Per-tick pull of fear toward the local crowd's mean.
+    "contagion_fear": 0.01,
+    // Per-tick pull of anger toward the local crowd's mean (rising; a third of it falling).
+    "contagion_anger": 0.004,
+    // Per-tick relaxation of emotions toward archetype baselines.
+    "emotion_relax": 0.002,
+    // How fast the emotion fields follow the people in each cell, per emotion update.
+    "field_blend": 0.25,
+    // Side weight of the 3-tap emotion field blur.
+    "field_diffuse": 0.15,
+    // Per-update decay of the threat field.
+    "threat_decay": 0.92,
+    // Threat per officer per update.
+    "threat_officer": 0.25,
+    // Threat stamped per violent act.
+    "threat_violence": 3.0,
+    // Fear per tick at full threat, scaled by timidity.
+    "threat_fear": 0.006,
+    // Anger per tick at full threat, scaled by willingness to use violence.
+    "threat_anger": 0.004,
+    // Per-tick decay of gas.
+    "gas_decay": 0.995,
+    // Side weight of the 3-tap gas blur.
+    "gas_diffuse": 0.18,
+    // Gas emitted per canister per tick.
+    "gas_emit": 6.0,
+    // Fear per tick per unit of gas.
+    "gas_fear": 0.12,
+    // Health lost per tick per unit of gas (protesters only; gas alone leaves at least 86% health).
+    "gas_damage": 0.00015,
+    // Fatigue per tick per unit of gas.
+    "gas_fatigue": 0.002,
+    // Per-tick decay of smoke.
+    "smoke_decay": 0.985,
+    // Radius of an organizer's chant (m).
+    "chant_radius": 12.0,
+    // Morale per tick from a chant at full strength.
+    "chant_morale": 0.0003,
+    // Organizer fatigue per tick while chanting.
+    "chant_cost": 0.00004,
+    // Per-tick morale loss when nothing lifts it, at moderate fear (fear speeds it up).
+    "morale_decay": 0.00001,
+    // Fatigue per tick while walking.
+    "fatigue_walk": 0.000006,
+    // Fatigue per tick while running.
+    "fatigue_run": 0.00004,
+    // Extra fatigue per tick at full heat.
+    "fatigue_heat": 0.000004,
+    // Fatigue recovered per tick while resting.
+    "rest_recover": 0.0001,
+    // Fatigue recovered by drinking.
+    "water_recover": 0.25,
+    // Health restored per tick at a medic post.
+    "medic_heal": 0.004,
+    // Pressure (0..1) above which bodies are crushed.
+    "crush_pressure": 0.7,
+    // Health lost per tick at the most excess pressure (fraction of full health).
+    "crush_damage": 0.0008,
+    // Fear per tick at the most excess pressure.
+    "crush_fear": 0.01,
+    // Pressure (0..1) above which people may fall.
+    "fall_pressure": 0.85,
+    // Per-tick fall chance at full excess pressure.
+    "fall_chance": 0.01,
+    // Per-tick chance of tripping per fallen neighbour when pushed.
+    "trip_chance": 0.004,
+    // Per-tick chance a fallen, unpressed person stands up.
+    "getup_chance": 0.02,
+    // Fidelity lost per word-of-mouth hop.
+    "hop_loss": 6.0,
+    // Per-tick chance of adopting a heard message, before trust.
+    "hear_rate": 0.08,
+    // Per-tick chance a phone receives the latest broadcast.
+    "phone_rate": 0.002,
+    // Fidelity factor of messages received by phone.
+    "phone_fidelity": 0.75,
+    // Fidelity below which messages can be garbled.
+    "garble_fidelity": 140.0,
+    // Radius in which organizers speak at full fidelity (m).
+    "organizer_voice": 10.0,
+    // Base score of violent actions.
+    "violence_base": 0.04,
+    // Maximum throwing distance (m).
+    "throw_range": 18.0,
+    // Projectile speed (m/s).
+    "throw_speed": 15.0,
+    // Ticks between throws.
+    "throw_cooldown": 60.0,
+    // Health lost to a projectile hit.
+    "projectile_damage": 0.08,
+    // Health lost to a baton strike.
+    "strike_damage": 0.08,
+    // Fraction of a blow or projectile that gets through an officer's helmet and body armour.
+    "officer_armour": 0.4,
+    // Reach of a strike beyond touching (m).
+    "strike_range": 0.9,
+    // Ticks for officers to restrain someone.
+    "arrest_ticks": 60.0,
+    // Ticks between police director replans.
+    "director_interval": 20.0,
+    // Summed threat that makes the director climb a rung.
+    "escalate_threat": 40.0,
+    // Calm ticks before the director steps down a rung.
+    "deescalate_ticks": 2400.0,
+    // Officer fear at which formation breaks.
+    "officer_break_fear": 0.75,
+    // Kettle radius shrink per tick (fraction).
+    "kettle_shrink": 0.004,
+    // Water cannon impulse (m/s).
+    "water_force": 3.0,
+    // Water cannon reach (m).
+    "water_range": 25.0,
+    // Per-tick chance fire spreads to a neighbouring fuel cell.
+    "fire_spread": 0.03,
+    // Fuel burnt per tick per burning cell.
+    "fire_burn": 2.0,
+    // Health lost per tick standing in full fire (nothing below 0.3 of it).
+    "fire_damage": 0.0015,
+    // Ticks a metro ride takes.
+    "metro_delay": 3600.0,
+    // Protesters per m² that count as holding an objective.
+    "hold_density": 0.4,
+    // Distance from an exit at which leaving people disappear (m).
+    "exit_radius": 4.0,
+    // Morale under which people consider going home.
+    "leave_morale": 0.18,
+    // Morale lost per tick per unit of gas (protesters).
+    "gas_morale": 0.0004,
+    // Morale lost to each blow or projectile that lands on a protester.
+    "hit_morale": 0.05,
+    // How far a camera sees (m).
+    "camera_radius": 25.0,
+}

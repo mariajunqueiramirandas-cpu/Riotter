@@ -1,0 +1,72 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/riot_core",
+    "crates/riot_team",
+    "crates/riot_sim",
+    "crates/riot_data",
+    "crates/riot_headless",
+    "crates/riot_render",
+    "crates/riot_app",
+]
+default-members = [
+    "crates/riot_core",
+    "crates/riot_team",
+    "crates/riot_sim",
+    "crates/riot_data",
+    "crates/riot_headless",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+riot_core = { path = "crates/riot_core" }
+riot_team = { path = "crates/riot_team" }
+riot_sim = { path = "crates/riot_sim" }
+riot_data = { path = "crates/riot_data" }
+riot_render = { path = "crates/riot_render" }
+rayon = "1.12"
+bytemuck = { version = "1.25", features = ["derive"] }
+libm = "0.2.16"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+ron = "0.12"
+macroquad = { version = "0.4.16", default-features = false }
+
+[workspace.lints.clippy]
+too_many_arguments = "allow"
+needless_range_loop = "allow"
+manual_memcpy = "allow"
+type_complexity = "allow"
+
+[profile.dev]
+opt-level = 1                  # our crates: quick to compile, fast enough for 10k agents
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 3                  # dependencies: optimized once, then cached
+debug = false
+
+[profile.test]
+opt-level = 1
+debug = "line-tables-only"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = "line-tables-only"     # readable profiler stacks
+
+[profile.profiling]            # cargo build --profile profiling
+inherits = "release"
+debug = true
+
+[profile.dist]                 # shipped builds
+inherits = "release"
+debug = false
+strip = true
