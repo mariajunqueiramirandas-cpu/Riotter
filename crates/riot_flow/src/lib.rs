@@ -286,7 +286,7 @@ impl FlowSystem {
     }
 
     /// Look up the flow tile of goal `g` for tile `t`.
-    #[inline]
+    #[inline(always)]
     pub fn lookup(&self, map: &Map, g: u8, t: u32) -> Lookup {
         let goal = &self.goals[g as usize];
         let r = map.region_of_tile(t);
@@ -1637,62 +1637,89 @@ pub fn sample_flow(fs: &FlowSystem, map: &Map, g: u8, p: Vec2, rec: &mut Vec<u64
     let (x0, y0) = (fx.floor(), fy.floor());
     let (wx, wy) = (fx - x0, fy - y0);
     let (x0, y0) = (x0 as i32, y0 as i32);
-    let mut acc = Vec2::ZERO;
-    let mut any = false;
-    let mut last_tile = u32::MAX;
-    let mut last_slot = None;
-    let (own_x, own_y) = ((fx + 0.5).floor() as i32, (fy + 0.5).floor() as i32);
-    let mut own_arrived = false;
-    let push = |rec: &mut Vec<u64>, r: u64| {
-        if rec.last() != Some(&r) && rec.len() < rec.capacity() {
-            rec.push(r);
-        }
-    };
-    for (dx, dy, w) in [
-        (0, 0, (1.0 - wx) * (1.0 - wy)),
-        (1, 0, wx * (1.0 - wy)),
-        (0, 1, (1.0 - wx) * wy),
-        (1, 1, wx * wy),
-    ] {
-        let (cx, cy) = (x0 + dx, y0 + dy);
-        if cx < 0 || cy < 0 || cx >= map.nav.dim as i32 || cy >= map.nav.dim as i32 {
-            continue;
-        }
-        let (cx, cy) = (cx as u32, cy as u32);
+    let dim = map.nav.dim as i32;
+    // Fast path: the four cells lie in one tile (15 times in 16 per axis).
+    // Same lookups, records and arithmetic, in the same order, as the
+    // general loop below.
+    if x0 >= 0 && y0 >= 0 && x0 + 1 < dim && y0 + 1 < dim && x0 & 15 != 15 && y0 & 15 != 15 {
+        let (cx, cy) = (x0 as u32, y0 as u32);
         let t = map.tile_index(cx >> 4, cy >> 4);
-        if t != last_tile {
-            last_tile = t;
-            last_slot = match fs.lookup(map, g, t) {
-                Lookup::Ready(s) => {
-                    push(rec, record(g, t, false));
-                    Some(s)
-                }
-                Lookup::Stale(s) => {
-                    push(rec, record(g, t, true));
-                    Some(s)
-                }
-                Lookup::Missing => {
-                    if map.tiles[t as usize] != BLOCKED {
-                        push(rec, record(g, t, true));
-                    }
-                    None
-                }
-            };
-        }
-        let Some(s) = last_slot else { continue };
-        let local = ((cy & 15) * 16 + (cx & 15)) as usize;
-        match decode_dir(fs.dir(s, local)) {
-            Some(d) => {
-                acc += d * w;
-                any = true;
+        let s = match fs.lookup(map, g, t) {
+            Lookup::Ready(s) => {
+                push_record(rec, record(g, t, false));
+                s
             }
-            None => {
-                if cx as i32 == own_x && cy as i32 == own_y && map.walkable(cx, cy) {
+            Lookup::Stale(s) => {
+                push_record(rec, record(g, t, true));
+                s
+            }
+            Lookup::Missing => {
+                if map.tiles[t as usize] != BLOCKED {
+                    push_record(rec, record(g, t, true));
+                }
+                return sample_tail(fs, map, g, p, Vec2::ZERO, false, false);
+            }
+        };
+        let local = ((cy & 15) * 16 + (cx & 15)) as usize;
+        let tile: &[u8; 256] = fs.dirs[s as usize * 256..][..256].try_into().unwrap();
+        // local <= 14 * 16 + 14, so local + 17 is in the tile.
+        let d = [
+            tile[local],
+            tile[(local + 1) & 255],
+            tile[(local + 16) & 255],
+            tile[(local + 17) & 255],
+        ];
+        let w = [
+            (1.0 - wx) * (1.0 - wy),
+            wx * (1.0 - wy),
+            (1.0 - wx) * wy,
+            wx * wy,
+        ];
+        let mut acc = Vec2::ZERO;
+        let mut any = false;
+        let mut hole = 4;
+        for k in 0..4 {
+            if d[k] != 0 {
+                let [c, s] = HEADING_DIRS[d[k].wrapping_sub(1) as usize];
+                acc += Vec2::new(c, s) * w[k];
+                any = true;
+            } else if hole == 4 {
+                hole = k;
+            }
+        }
+        let mut own_arrived = false;
+        if hole < 4 {
+            // A cell with no direction: arrived if it is the own cell.
+            let (own_x, own_y) = ((fx + 0.5).floor() as i32, (fy + 0.5).floor() as i32);
+            for k in hole..4 {
+                let (cx, cy) = (x0 + (k as i32 & 1), y0 + (k as i32 >> 1));
+                if d[k] == 0 && cx == own_x && cy == own_y && map.walkable(cx as u32, cy as u32) {
                     own_arrived = true;
                 }
             }
         }
+        return sample_tail(fs, map, g, p, acc, any, own_arrived);
     }
+    sample_flow_general(fs, map, g, p, rec, fx, fy, x0, y0, wx, wy)
+}
+
+#[inline]
+fn push_record(rec: &mut Vec<u64>, r: u64) {
+    if rec.last() != Some(&r) && rec.len() < rec.capacity() {
+        rec.push(r);
+    }
+}
+
+#[inline(always)]
+fn sample_tail(
+    fs: &FlowSystem,
+    map: &Map,
+    g: u8,
+    p: Vec2,
+    acc: Vec2,
+    any: bool,
+    own_arrived: bool,
+) -> FlowSample {
     if own_arrived
         && fs.goals[g as usize].targets.iter().any(|&q| {
             (q - p).len2() <= {
@@ -1712,6 +1739,106 @@ pub fn sample_flow(fs: &FlowSystem, map: &Map, g: u8, p: Vec2, rec: &mut Vec<u64
     match coarse_dir(fs, map, g, p) {
         Some(d) => FlowSample::Dir(d),
         None => FlowSample::Missing,
+    }
+}
+
+/// [`sample_flow`] where the four cells straddle tiles or the map edge.
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn sample_flow_general(
+    fs: &FlowSystem,
+    map: &Map,
+    g: u8,
+    p: Vec2,
+    rec: &mut Vec<u64>,
+    fx: f32,
+    fy: f32,
+    x0: i32,
+    y0: i32,
+    wx: f32,
+    wy: f32,
+) -> FlowSample {
+    let mut c = Corners {
+        acc: Vec2::ZERO,
+        any: false,
+        last_tile: u32::MAX,
+        last_slot: None,
+        own: ((fx + 0.5).floor() as i32, (fy + 0.5).floor() as i32),
+        own_arrived: false,
+    };
+    // The corners in order, unrolled: the same lookups, records and sums.
+    c.corner(fs, map, g, rec, x0, y0, (1.0 - wx) * (1.0 - wy));
+    c.corner(fs, map, g, rec, x0 + 1, y0, wx * (1.0 - wy));
+    c.corner(fs, map, g, rec, x0, y0 + 1, (1.0 - wx) * wy);
+    c.corner(fs, map, g, rec, x0 + 1, y0 + 1, wx * wy);
+    sample_tail(fs, map, g, p, c.acc, c.any, c.own_arrived)
+}
+
+/// What [`sample_flow_general`] has gathered from the corners so far.
+struct Corners {
+    acc: Vec2,
+    any: bool,
+    last_tile: u32,
+    last_slot: Option<u32>,
+    /// The cell `p` is in.
+    own: (i32, i32),
+    own_arrived: bool,
+}
+
+impl Corners {
+    /// Add corner cell `(cx, cy)` with bilinear weight `w`, looking its tile
+    /// up (and recording it) unless the previous corner was in the same tile.
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    fn corner(
+        &mut self,
+        fs: &FlowSystem,
+        map: &Map,
+        g: u8,
+        rec: &mut Vec<u64>,
+        cx: i32,
+        cy: i32,
+        w: f32,
+    ) {
+        let dim = map.nav.dim as i32;
+        if cx < 0 || cy < 0 || cx >= dim || cy >= dim {
+            return;
+        }
+        let (cx, cy) = (cx as u32, cy as u32);
+        let t = map.tile_index(cx >> 4, cy >> 4);
+        if t != self.last_tile {
+            self.last_tile = t;
+            self.last_slot = match fs.lookup(map, g, t) {
+                Lookup::Ready(s) => {
+                    push_record(rec, record(g, t, false));
+                    Some(s)
+                }
+                Lookup::Stale(s) => {
+                    push_record(rec, record(g, t, true));
+                    Some(s)
+                }
+                Lookup::Missing => {
+                    if map.tiles[t as usize] != BLOCKED {
+                        push_record(rec, record(g, t, true));
+                    }
+                    None
+                }
+            };
+        }
+        let Some(s) = self.last_slot else { return };
+        let local = ((cy & 15) * 16 + (cx & 15)) as usize;
+        match decode_dir(fs.dir(s, local)) {
+            Some(d) => {
+                self.acc += d * w;
+                self.any = true;
+            }
+            None => {
+                if (cx as i32, cy as i32) == self.own && map.walkable(cx, cy) {
+                    self.own_arrived = true;
+                }
+            }
+        }
     }
 }
 
