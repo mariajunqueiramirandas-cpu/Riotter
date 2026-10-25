@@ -14,7 +14,7 @@ use riot_defs::harm::Harm;
 use riot_defs::mapdef::EntryKind;
 use riot_defs::setup::{DT, NotableKind};
 use riot_defs::state::{Action, flag, intent, pose, stat};
-use riot_fields::{CC, CL, Cone, Layer, NO_CHUNK, blur_shift_kernel};
+use riot_fields::{CC, CL, Layer, NO_CHUNK, blur_shift_kernel};
 use riot_people::Spawn;
 use riot_snapshot::prop_flag;
 use riot_spatial::FIELD_CELL;
@@ -56,6 +56,7 @@ pub fn pin_emitters(w: &mut World) {
 /// filming journalists and phones (DESIGN §2.7). Every 10 ticks. The chunks
 /// are stamped in parallel, each adding the cameras in index order.
 pub fn stamp_cameras(w: &mut World) {
+    let rc = w.tun.camera_radius / FIELD_CELL;
     let f = &mut w.fields;
     f.cones.clear();
     // Room for everyone once, so filming never allocates.
@@ -73,10 +74,9 @@ pub fn stamp_cameras(w: &mut World) {
         } else {
             1.0
         };
-        let (fx, fy) = f.geom.to_cell_f(p.x, p.y);
-        f.cones.push(Cone { fx, fy, fwd, v });
+        f.push_cone(p, fwd, rc, v);
     }
-    f.stamp_cones(Layer::Camera, w.tun.camera_radius / FIELD_CELL);
+    f.stamp_cones(Layer::Camera);
 }
 
 /// Gas and smoke drift with the wind, diffuse and decay; fire burns fuel and

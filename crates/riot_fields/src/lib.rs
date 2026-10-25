@@ -992,13 +992,34 @@ impl Fields {
             });
     }
 
-    /// Set layer `l` of every active chunk to the sum, at each cell, of the
-    /// `v` of the [`Cone`]s in `self.cones` that see it; `rc` is their
-    /// radius in cells. Parallel per chunk: each cell adds its cones in list
-    /// order, as stamping one cone after the other does.
-    pub fn stamp_cones(&mut self, l: Layer, rc: f32) {
-        let li = l as usize;
+    /// Add to `cones` the view of a camera at `p` facing `fwd`, with radius
+    /// `rc` cells, that adds `v` to each cell it sees.
+    pub fn push_cone(&mut self, p: Vec2, fwd: Vec2, rc: f32, v: f32) {
+        let (fx, fy) = self.geom.to_cell_f(p.x, p.y);
         let dim = self.geom.dim as i32;
+        self.cones.push(Cone {
+            fx,
+            fy,
+            rc,
+            fwd,
+            v,
+            x: [
+                ((fx - rc).floor() as i32).max(0),
+                ((fx + rc).ceil() as i32).min(dim),
+            ],
+            y: [
+                ((fy - rc).floor() as i32).max(0),
+                ((fy + rc).ceil() as i32).min(dim),
+            ],
+        });
+    }
+
+    /// Set layer `l` of every active chunk to the sum, at each cell, of the
+    /// `v` of the [`Cone`]s in `self.cones` that see it. Parallel per chunk:
+    /// each cell adds its cones in list order, as stamping one cone after
+    /// the other does.
+    pub fn stamp_cones(&mut self, l: Layer) {
+        let li = l as usize;
         let cdim = self.cdim;
         let (cones, slot_chunk) = (&self.cones, &self.slot_chunk);
         self.data
@@ -1017,20 +1038,17 @@ impl Fields {
                 let (gx, gy) = ((c % cdim * CC as u32) as i32, (c / cdim * CC as u32) as i32);
                 let mut any = false;
                 for k in cones {
-                    let (fx, fy, fwd) = (k.fx, k.fy, k.fwd);
-                    // The cone's cells, as `stamp_cone` loops over them,
-                    // within this chunk.
-                    let y0 = ((fy - rc).floor() as i32).max(0).max(gy);
-                    let y1 = ((fy + rc).ceil() as i32).min(dim).min(gy + CC as i32);
-                    let x0 = ((fx - rc).floor() as i32).max(0).max(gx);
-                    let x1 = ((fx + rc).ceil() as i32).min(dim).min(gx + CC as i32);
+                    let (fx, fy, rc, fwd) = (k.fx, k.fy, k.rc, k.fwd);
+                    // The cone's cells within this chunk.
+                    let (y0, y1) = (k.y[0].max(gy), k.y[1].min(gy + CC as i32));
+                    let (x0, x1) = (k.x[0].max(gx), k.x[1].min(gx + CC as i32));
                     for cy in y0..y1 {
                         for cx in x0..x1 {
                             let (dx, dy) = (cx as f32 + 0.5 - fx, cy as f32 + 0.5 - fy);
                             if dx * dx + dy * dy > rc * rc || dx * fwd.x + dy * fwd.y < -0.5 {
                                 continue;
                             }
-                            layer[(cy - gy) as usize * CC + (cx - gx) as usize] += k.v;
+                            layer[((cy - gy) as usize * CC + (cx - gx) as usize) & (CL - 1)] += k.v;
                             any = true;
                         }
                     }
@@ -1141,16 +1159,21 @@ pub fn field_cell_of(f: &Fields, p: Vec2) -> u32 {
     (cy * f.geom.dim + cx) & aux::NO_TARGET.wrapping_sub(1)
 }
 
-/// A camera's view for [`Fields::stamp_cones`]: the cells whose centres are
-/// within the radius of `(fx, fy)` (in cells) and not behind it.
+/// A camera's view for [`Fields::stamp_cones`] (made by
+/// [`Fields::push_cone`]): the cells whose centres are within `rc` cells of
+/// `(fx, fy)` and not behind it.
 #[derive(Clone, Copy, Debug)]
 pub struct Cone {
-    pub fx: f32,
-    pub fy: f32,
+    fx: f32,
+    fy: f32,
+    rc: f32,
     /// Facing.
-    pub fwd: Vec2,
+    fwd: Vec2,
     /// Added to each cell seen.
-    pub v: f32,
+    v: f32,
+    /// The cells to test, `[x0, x1) × [y0, y1)`.
+    x: [i32; 2],
+    y: [i32; 2],
 }
 
 /// The four field cells around a point and its bilinear weights.
