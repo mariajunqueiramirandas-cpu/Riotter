@@ -1,0 +1,16 @@
+[package]
+name = "riot_spatial"
+description = "Spatial indexes rebuilt each tick: the body hash, neighbour lists, field index and obstacle grid."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+riot_core.workspace = true
+riot_defs.workspace = true
+riot_people.workspace = true
+riot_team.workspace = true
+
+[lints]
+workspace = true

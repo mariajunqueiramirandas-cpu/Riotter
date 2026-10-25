@@ -448,6 +448,50 @@ dependencies = [
 ]
 
 [[package]]
+name = "riot_defs"
+version = "0.1.0"
+dependencies = [
+ "riot_core",
+]
+
+[[package]]
+name = "riot_fields"
+version = "0.1.0"
+dependencies = [
+ "riot_core",
+ "riot_defs",
+ "riot_map",
+ "riot_people",
+ "riot_spatial",
+ "riot_team",
+]
+
+[[package]]
+name = "riot_flow"
+version = "0.1.0"
+dependencies = [
+ "riot_core",
+ "riot_defs",
+ "riot_fields",
+ "riot_map",
+ "riot_team",
+ "riot_testkit",
+]
+
+[[package]]
+name = "riot_hazards"
+version = "0.1.0"
+dependencies = [
+ "riot_core",
+ "riot_defs",
+ "riot_fields",
+ "riot_people",
+ "riot_snapshot",
+ "riot_spatial",
+ "riot_world",
+]
+
+[[package]]
 name = "riot_headless"
 version = "0.1.0"
 dependencies = [
@@ -456,6 +500,28 @@ dependencies = [
  "riot_data",
  "riot_sim",
  "riot_team",
+]
+
+[[package]]
+name = "riot_interact"
+version = "0.1.0"
+dependencies = [
+ "riot_core",
+ "riot_defs",
+ "riot_fields",
+ "riot_hazards",
+ "riot_snapshot",
+ "riot_team",
+ "riot_world",
+]
+
+[[package]]
+name = "riot_map"
+version = "0.1.0"
+dependencies = [
+ "rayon",
+ "riot_core",
+ "riot_defs",
 ]
 
 [[package]]
@@ -473,6 +539,66 @@ dependencies = [
  "riot_materials",
  "riot_sheets",
  "riot_sim",
+]
+
+[[package]]
+name = "riot_messages"
+version = "0.1.0"
+dependencies = [
+ "riot_core",
+ "riot_defs",
+ "riot_fields",
+ "riot_people",
+ "riot_spatial",
+ "riot_team",
+ "riot_world",
+]
+
+[[package]]
+name = "riot_outcome"
+version = "0.1.0"
+dependencies = [
+ "riot_core",
+ "riot_defs",
+ "riot_fields",
+ "riot_snapshot",
+ "riot_spatial",
+ "riot_team",
+ "riot_world",
+]
+
+[[package]]
+name = "riot_people"
+version = "0.1.0"
+dependencies = [
+ "riot_core",
+ "riot_defs",
+ "riot_team",
+]
+
+[[package]]
+name = "riot_physics"
+version = "0.1.0"
+dependencies = [
+ "riot_core",
+ "riot_defs",
+ "riot_map",
+ "riot_people",
+ "riot_spatial",
+ "riot_team",
+]
+
+[[package]]
+name = "riot_police"
+version = "0.1.0"
+dependencies = [
+ "riot_core",
+ "riot_defs",
+ "riot_fields",
+ "riot_flow",
+ "riot_snapshot",
+ "riot_tactics",
+ "riot_world",
 ]
 
 [[package]]
@@ -499,10 +625,44 @@ dependencies = [
 name = "riot_sim"
 version = "0.1.0"
 dependencies = [
- "bytemuck",
- "libm",
- "rayon",
  "riot_core",
+ "riot_defs",
+ "riot_fields",
+ "riot_flow",
+ "riot_hazards",
+ "riot_interact",
+ "riot_map",
+ "riot_messages",
+ "riot_outcome",
+ "riot_people",
+ "riot_physics",
+ "riot_police",
+ "riot_snapshot",
+ "riot_spatial",
+ "riot_steer",
+ "riot_tactics",
+ "riot_team",
+ "riot_testkit",
+ "riot_think",
+ "riot_world",
+]
+
+[[package]]
+name = "riot_snapshot"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "riot_core",
+ "riot_defs",
+]
+
+[[package]]
+name = "riot_spatial"
+version = "0.1.0"
+dependencies = [
+ "riot_core",
+ "riot_defs",
+ "riot_people",
  "riot_team",
 ]
 
@@ -514,8 +674,71 @@ dependencies = [
 ]
 
 [[package]]
+name = "riot_steer"
+version = "0.1.0"
+dependencies = [
+ "riot_core",
+ "riot_defs",
+ "riot_fields",
+ "riot_flow",
+ "riot_map",
+ "riot_people",
+ "riot_spatial",
+ "riot_team",
+]
+
+[[package]]
+name = "riot_tactics"
+version = "0.1.0"
+dependencies = [
+ "riot_core",
+ "riot_defs",
+ "riot_fields",
+ "riot_flow",
+ "riot_map",
+ "riot_snapshot",
+ "riot_spatial",
+ "riot_world",
+]
+
+[[package]]
 name = "riot_team"
 version = "0.1.0"
+
+[[package]]
+name = "riot_testkit"
+version = "0.1.0"
+dependencies = [
+ "riot_defs",
+]
+
+[[package]]
+name = "riot_think"
+version = "0.1.0"
+dependencies = [
+ "riot_core",
+ "riot_defs",
+ "riot_fields",
+ "riot_people",
+ "riot_spatial",
+ "riot_team",
+ "riot_world",
+]
+
+[[package]]
+name = "riot_world"
+version = "0.1.0"
+dependencies = [
+ "libm",
+ "riot_core",
+ "riot_defs",
+ "riot_fields",
+ "riot_flow",
+ "riot_map",
+ "riot_people",
+ "riot_snapshot",
+ "riot_spatial",
+]
 
 [[package]]
 name = "ron"

@@ -1,0 +1,13 @@
+[package]
+name = "riot_testkit"
+description = "Procedural maps and setups for tests, benchmarks and the headless tool."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+riot_defs.workspace = true
+
+[lints]
+workspace = true
