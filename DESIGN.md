@@ -166,15 +166,29 @@ Phases 2 and 7 are backed by the body prototype. The rest are budgets, not measu
 
 ```
 riotter/
-├── Cargo.toml              workspace + build profiles (§15)
+├── Cargo.toml              workspace + build profiles (§15); members = crates/*
 ├── .cargo/config.toml      linker, target CPU
 ├── crates/
 │   ├── riot_core/          math, ids, RNG, lane storage, grid geometry. No dependencies.
-│   ├── riot_sim/           world state, systems, tick schedule.
-│   │                       deps: riot_core, rayon, bytemuck, libm
-│   ├── riot_data/          RON scenario and tunable files → riot_sim types. deps: serde, ron
+│   ├── riot_team/          the fork-join thread team the tick runs on (§12)
+│   │   simulation, bottom to top:
+│   ├── riot_defs/          definitions: archetypes, state layout, setup, tunables, map defs
+│   ├── riot_snapshot/      the render snapshot (§18.1)
+│   ├── riot_testkit/       test maps and scenarios
+│   ├── riot_map/ riot_people/ riot_spatial/ riot_fields/ riot_flow/ riot_steer/ riot_physics/
+│   │                       systems over part of the world
+│   ├── riot_world/         World and the state of the world-level systems
+│   ├── riot_think/ riot_messages/ riot_hazards/ riot_interact/ riot_tactics/ riot_police/ riot_outcome/
+│   │                       phases over the whole world
+│   ├── riot_sim/           the tick schedule; the facade every user names
+│   │   data, depending on riot_defs only:
+│   ├── riot_data_core/ riot_data_tiled/ riot_data_citygen/ riot_data_tunables/ riot_data_scenario/
+│   ├── riot_data/          facade: RON scenario and tunable files, Tiled maps → riot_defs types
 │   ├── riot_headless/      CLI: batch runs, benchmarks, determinism + allocation checks
-│   ├── riot_render/        snapshots → GPU: debug view, then instanced sprites (§18)
+│   │   rendering, depending on riot_defs and riot_snapshot only:
+│   ├── riot_art/ riot_materials/ riot_sheets/ riot_sprites/   procedural pixel art, no GPU
+│   ├── riot_mesh/          map meshes on the CPU
+│   ├── riot_render/        snapshots → GPU (§18)
 │   └── riot_app/           window and input (macroquad), input → commands, hot reload
 └── data/
     ├── maps/               Tiled maps (JSON): polygons, tile layers, named objects
@@ -183,7 +197,7 @@ riotter/
     └── tunables.ron
 ```
 
-`riot_sim` is the crate we will edit most often, so it deliberately carries no proc macros and no heavy dependencies. Serde lives in `riot_data`, and the dependency points from `riot_data` to `riot_sim`, never the other way. Rebuilding after an edit to the simulation therefore compiles a single crate and then links.
+The simulation is split into small crates along its real seams, so an edit to one system rebuilds that crate, the few above it and the link. None of the simulation crates carries proc macros or heavy dependencies. Serde lives in the data crates, and they depend only on `riot_defs`, never on the simulation, so the data layer and the renderer compile in parallel with it and are not rebuilt by a simulation edit. `riot_sim`, `riot_data` and `riot_render` are facades that keep every older module path working.
 
 ### 4.2 Ownership rules
 
@@ -682,8 +696,8 @@ debug = false
 
 [profile.release]
 opt-level = 3
-lto = "fat"
-codegen-units = 1
+lto = "thin"                   # as fast as fat LTO here, and links in parallel
+codegen-units = 16
 panic = "abort"
 debug = "line-tables-only"     # readable profiler stacks
 
@@ -693,13 +707,15 @@ debug = true
 
 [profile.dist]                 # shipped builds
 inherits = "release"
+lto = "fat"
+codegen-units = 1
 debug = false
 strip = true
 ```
 
 Measured with the prototype on a 4-core cloud VM:
 - Rebuilding after a simulation edit takes about 0.5 s.
-- With the simulation crate grown to 17k lines, the rebuild takes 2.3 s. An edit to a different crate stays at 0.6 s.
+- With the simulation grown to 17k lines in one crate, a dev rebuild took 1.4 s and a release rebuild 40 s. Split into crates (§4.1) with thin LTO, a steering edit rebuilds in 0.5 s (dev) and 12 s (release).
 - The dev profile runs the simulation at release speed, 4.5× faster than Cargo's default dev profile.
 
 - **Target CPU:** release and dist builds target `x86-64-v3` (AVX2, FMA, BMI2), set in `.cargo/config.toml`. A baseline `x86-64` build ships alongside for older CPUs, and the two must produce identical state hashes (§12).
@@ -740,7 +756,7 @@ Once `std::simd` is stable, migrate the `wide` code to it.
 - The scalar paths run under Miri.
 
 **Dependencies**
-- `riot_sim` depends on `riot_core`, `rayon`, `bytemuck` and `libm`, and nothing else. Any new dependency has to justify its cost in compile time and its risk to determinism.
+- The simulation crates depend on `riot_core`, `riot_team`, `rayon`, `bytemuck` and `libm`, and nothing else. Any new dependency has to justify its cost in compile time and its risk to determinism.
 
 ---
 

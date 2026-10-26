@@ -7,7 +7,14 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-riot_sim.workspace = true
+riot_art.workspace = true
+riot_materials.workspace = true
+riot_mesh.workspace = true
+riot_sheets.workspace = true
+# Definitions and snapshot types only, not the simulation.
+riot_defs.workspace = true
+riot_snapshot.workspace = true
+riot_sprites.workspace = true
 macroquad.workspace = true
 
 [lints]

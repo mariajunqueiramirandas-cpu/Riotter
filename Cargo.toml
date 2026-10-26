@@ -1,18 +1,33 @@
 [workspace]
 resolver = "3"
-members = [
-    "crates/riot_core",
-    "crates/riot_team",
-    "crates/riot_sim",
-    "crates/riot_data",
-    "crates/riot_headless",
-    "crates/riot_render",
-    "crates/riot_app",
-]
+members = ["crates/*"]
 default-members = [
     "crates/riot_core",
     "crates/riot_team",
+    "crates/riot_defs",
+    "crates/riot_snapshot",
+    "crates/riot_testkit",
+    "crates/riot_map",
+    "crates/riot_people",
+    "crates/riot_spatial",
+    "crates/riot_fields",
+    "crates/riot_flow",
+    "crates/riot_steer",
+    "crates/riot_physics",
+    "crates/riot_world",
+    "crates/riot_think",
+    "crates/riot_messages",
+    "crates/riot_hazards",
+    "crates/riot_interact",
+    "crates/riot_tactics",
+    "crates/riot_police",
+    "crates/riot_outcome",
     "crates/riot_sim",
+    "crates/riot_data_core",
+    "crates/riot_data_tiled",
+    "crates/riot_data_citygen",
+    "crates/riot_data_tunables",
+    "crates/riot_data_scenario",
     "crates/riot_data",
     "crates/riot_headless",
 ]
@@ -20,21 +35,52 @@ default-members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.99"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 riot_core = { path = "crates/riot_core" }
 riot_team = { path = "crates/riot_team" }
+riot_defs = { path = "crates/riot_defs" }
+riot_snapshot = { path = "crates/riot_snapshot" }
+riot_testkit = { path = "crates/riot_testkit" }
+riot_map = { path = "crates/riot_map" }
+riot_people = { path = "crates/riot_people" }
+riot_spatial = { path = "crates/riot_spatial" }
+riot_fields = { path = "crates/riot_fields" }
+riot_flow = { path = "crates/riot_flow" }
+riot_steer = { path = "crates/riot_steer" }
+riot_physics = { path = "crates/riot_physics" }
+riot_world = { path = "crates/riot_world" }
+riot_think = { path = "crates/riot_think" }
+riot_messages = { path = "crates/riot_messages" }
+riot_hazards = { path = "crates/riot_hazards" }
+riot_interact = { path = "crates/riot_interact" }
+riot_tactics = { path = "crates/riot_tactics" }
+riot_police = { path = "crates/riot_police" }
+riot_outcome = { path = "crates/riot_outcome" }
 riot_sim = { path = "crates/riot_sim" }
+riot_data_core = { path = "crates/riot_data_core" }
+riot_data_tiled = { path = "crates/riot_data_tiled" }
+riot_data_citygen = { path = "crates/riot_data_citygen" }
+riot_data_tunables = { path = "crates/riot_data_tunables" }
+riot_data_scenario = { path = "crates/riot_data_scenario" }
 riot_data = { path = "crates/riot_data" }
 riot_render = { path = "crates/riot_render" }
+riot_art = { path = "crates/riot_art" }
+riot_materials = { path = "crates/riot_materials" }
+riot_sheets = { path = "crates/riot_sheets" }
+riot_sprites = { path = "crates/riot_sprites" }
+riot_mesh = { path = "crates/riot_mesh" }
 rayon = "1.12"
 bytemuck = { version = "1.25", features = ["derive"] }
 libm = "0.2.16"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 ron = "0.12"
+# Tiled's zlib/gzip tile layers and the ground tileset's PNG. Already in
+# Cargo.lock (macroquad → png), pure Rust, only depends on adler2.
+miniz_oxide = "0.8"
 macroquad = { version = "0.4.16", default-features = false }
 
 [workspace.lints.clippy]
@@ -57,8 +103,11 @@ debug = "line-tables-only"
 
 [profile.release]
 opt-level = 3
-lto = "fat"
-codegen-units = 1
+# Thin LTO over 16 codegen units: the tick runs as fast as with fat LTO and
+# one unit (2.61 vs 2.63 ms p50 on the standard riot), and a rebuild after a
+# simulation edit links in 12 s instead of 24 s.
+lto = "thin"
+codegen-units = 16
 panic = "abort"
 debug = "line-tables-only"     # readable profiler stacks
 
@@ -66,7 +115,9 @@ debug = "line-tables-only"     # readable profiler stacks
 inherits = "release"
 debug = true
 
-[profile.dist]                 # shipped builds
+[profile.dist]                 # shipped builds: every last cross-crate inline
 inherits = "release"
+lto = "fat"
+codegen-units = 1
 debug = false
 strip = true

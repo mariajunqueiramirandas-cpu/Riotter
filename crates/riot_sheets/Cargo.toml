@@ -1,0 +1,13 @@
+[package]
+name = "riot_sheets"
+description = "Pixel-art decal, prop and vehicle atlases, generated at every art level."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+riot_art.workspace = true
+
+[lints]
+workspace = true

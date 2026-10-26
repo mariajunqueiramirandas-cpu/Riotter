@@ -8,10 +8,27 @@ license.workspace = true
 
 [dependencies]
 riot_core.workspace = true
+riot_defs.workspace = true
+riot_fields.workspace = true
+riot_flow.workspace = true
+riot_hazards.workspace = true
+riot_interact.workspace = true
+riot_map.workspace = true
+riot_messages.workspace = true
+riot_outcome.workspace = true
+riot_people.workspace = true
+riot_physics.workspace = true
+riot_police.workspace = true
+riot_snapshot.workspace = true
+riot_spatial.workspace = true
+riot_steer.workspace = true
+riot_tactics.workspace = true
+riot_testkit.workspace = true
+riot_think.workspace = true
+riot_world.workspace = true
+
+[dev-dependencies]
 riot_team.workspace = true
-rayon.workspace = true
-bytemuck.workspace = true
-libm.workspace = true
 
 [lints]
 workspace = true

@@ -1,0 +1,21 @@
+[package]
+name = "riot_world"
+description = "All riot simulation state in one World, and the bookkeeping that only touches state."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+riot_core.workspace = true
+riot_defs.workspace = true
+riot_fields.workspace = true
+riot_flow.workspace = true
+riot_map.workspace = true
+riot_people.workspace = true
+riot_snapshot.workspace = true
+riot_spatial.workspace = true
+libm.workspace = true
+
+[lints]
+workspace = true

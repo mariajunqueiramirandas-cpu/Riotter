@@ -1,0 +1,14 @@
+[package]
+name = "riot_data_core"
+description = "The error type and portable geometry shared by the riot_data crates."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# No dependencies: every data crate builds on this one, so it must not wait
+# for serde, ron or the simulation.
+[dependencies]
+
+[lints]
+workspace = true

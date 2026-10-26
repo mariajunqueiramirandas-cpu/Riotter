@@ -1,0 +1,19 @@
+[package]
+name = "riot_interact"
+description = "The interaction phase: events emitted in parallel and resolved in order."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+riot_core.workspace = true
+riot_defs.workspace = true
+riot_fields.workspace = true
+riot_hazards.workspace = true
+riot_snapshot.workspace = true
+riot_team.workspace = true
+riot_world.workspace = true
+
+[lints]
+workspace = true

@@ -1,23 +1,29 @@
 [package]
 name = "riot_data"
-description = "RON scenarios, tunables and Tiled maps → riot_sim types."
+description = "RON scenarios, tunables and Tiled maps → riot_defs types."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+# The facade over the riot_data_* crates; it adds only loading a scenario
+# with its map and tunables, so it needs no serde of its own.
 [dependencies]
-riot_sim.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-ron.workspace = true
-# Tiled's zlib/gzip tile layers; the 8 km city's ground layer is 4 M tiles.
-# Already in Cargo.lock (macroquad → png), pure Rust, only depends on adler2.
-miniz_oxide = "0.8"
+riot_data_core.workspace = true
+riot_data_tiled.workspace = true
+riot_data_citygen.workspace = true
+riot_data_tunables.workspace = true
+riot_data_scenario.workspace = true
+# Definitions only (`MapDef`, `RiotSetup`, `Tunables`) and, for
+# `generated:testkit` maps, `riot_testkit::district`: the data layer never
+# waits for the simulation to compile.
+riot_defs.workspace = true
+riot_testkit.workspace = true
 
 [dev-dependencies]
-# Tests walk riot_sim's nav map, whose API takes riot_core::Vec2.
-riot_core.workspace = true
+# The tests build worlds (`riot_sim::World`); `gen_data --nav` builds the
+# nav map (`riot_sim::map::Map`).
+riot_sim.workspace = true
 
 [lints]
 workspace = true

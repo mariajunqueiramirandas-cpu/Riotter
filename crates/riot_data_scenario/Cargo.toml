@@ -1,0 +1,24 @@
+[package]
+name = "riot_data_scenario"
+description = "RON scenario files: a serde mirror of riot_defs' RiotSetup, resolved against a map."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+riot_data_core.workspace = true
+# For `ron_error`, shared by every RON reader.
+riot_data_tunables.workspace = true
+# Definitions only: `setup`, `archetype` (`Archetype`, `ARCHETYPES`,
+# `Stance`), `RiotSetup`, `TICK_HZ` and `MapDef`.
+riot_defs.workspace = true
+serde.workspace = true
+ron.workspace = true
+
+[dev-dependencies]
+# `testkit::{district, march}`.
+riot_testkit.workspace = true
+
+[lints]
+workspace = true

@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use macroquad::miniquad::*;
 use macroquad::prelude::Rect;
-use riot_sim::snapshot::FieldSnap;
+use riot_snapshot::FieldSnap;
 
 use crate::camera::Camera;
 

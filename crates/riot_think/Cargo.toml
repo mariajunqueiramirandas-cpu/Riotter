@@ -1,0 +1,19 @@
+[package]
+name = "riot_think"
+description = "The think phase: staggered utility AI for civilians, formation and force for officers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+riot_core.workspace = true
+riot_defs.workspace = true
+riot_fields.workspace = true
+riot_people.workspace = true
+riot_spatial.workspace = true
+riot_team.workspace = true
+riot_world.workspace = true
+
+[lints]
+workspace = true

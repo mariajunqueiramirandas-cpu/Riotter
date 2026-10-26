@@ -1,0 +1,20 @@
+[package]
+name = "riot_mesh"
+description = "CPU-side render geometry: layered textured meshes, map ground and roof meshes, street lamps."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+riot_art.workspace = true
+riot_materials.workspace = true
+riot_sheets.workspace = true
+# Map definitions only (`riot_defs::mapdef`).
+riot_defs.workspace = true
+
+[dev-dependencies]
+riot_testkit.workspace = true
+
+[lints]
+workspace = true

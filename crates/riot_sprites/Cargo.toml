@@ -1,0 +1,13 @@
+[package]
+name = "riot_sprites"
+description = "Layered paper-doll people sheets and palettes in pixel art, generated at every art level."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+riot_art.workspace = true
+
+[lints]
+workspace = true

@@ -15,10 +15,11 @@
 //! unsafe code live; simulation code only calls [`Team::run`] and
 //! [`Team::for_chunks`].
 
+use core::any::Any;
 use core::marker::PhantomData;
 use std::cell::{Cell, UnsafeCell};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle, Thread};
 use std::time::{Duration, Instant};
 
@@ -26,24 +27,47 @@ use std::time::{Duration, Instant};
 const SPIN: Duration = Duration::from_millis(2);
 
 type Job = dyn Fn(usize) + Sync;
+type Panic = Box<dyn Any + Send>;
+
+/// Bits of the claim word: job epoch, task count, next task index.
+const NEXT_BITS: u32 = 18;
+const TASK_BITS: u32 = 18;
+const TAG_SHIFT: u32 = NEXT_BITS + TASK_BITS;
+const FIELD: u64 = (1 << NEXT_BITS) - 1;
+const EPOCH_MASK: u64 = (1 << (64 - TAG_SHIFT)) - 1;
+/// Most tasks one claim word hands out; [`Team::run`] groups bigger jobs.
+const MAX_TASKS: usize = (1 << TASK_BITS) - 1;
+
+#[inline]
+fn claim_word(epoch: u64, tasks: usize) -> u64 {
+    ((epoch & EPOCH_MASK) << TAG_SHIFT) | ((tasks as u64) << NEXT_BITS)
+}
 
 struct Shared {
-    /// Bumped for every job; workers watch it.
+    /// Bumped for every job; idle workers watch it to wake up.
     epoch: AtomicU64,
-    /// The current job, valid while `pending > 0`.
+    /// `epoch << 36 | tasks << 18 | next`. A task is taken by a CAS on the
+    /// whole word, so a thread that read it during an earlier job can only
+    /// take an index that is free in the current one.
+    claim: AtomicU64,
+    /// The current job. Read only by a thread that has just claimed one of
+    /// its tasks.
     job: UnsafeCell<Option<*const Job>>,
-    tasks: AtomicUsize,
-    next: AtomicUsize,
-    /// Workers that have not finished the current job.
-    pending: AtomicUsize,
+    /// Tasks of the current job that have finished.
+    done: AtomicUsize,
     parked: Vec<AtomicBool>,
+    /// A task of the current job panicked; its payload is in `panic`.
     panicked: AtomicBool,
+    panic: Mutex<Option<Panic>>,
     stop: AtomicBool,
 }
 
-// SAFETY: `job` is written only by the thread running `Team::run` while no
-// worker reads it (all workers are between jobs), and read by workers only
-// after they observe the new epoch with Acquire ordering.
+// SAFETY: `job` is written only by the thread running `Team::run`, and only
+// while no task is claimed: before it publishes the job's claim word
+// (Release), when every task of the previous job has finished, and after
+// every task of this job has finished. In between it is read only by
+// threads that claimed a task, with an Acquire CAS on a value the
+// publishing store heads, and `run` waits for each of those tasks.
 unsafe impl Sync for Shared {}
 unsafe impl Send for Shared {}
 
@@ -63,12 +87,12 @@ impl Team {
         let n = threads.max(1) - 1;
         let shared = Arc::new(Shared {
             epoch: AtomicU64::new(0),
+            claim: AtomicU64::new(0),
             job: UnsafeCell::new(None),
-            tasks: AtomicUsize::new(0),
-            next: AtomicUsize::new(0),
-            pending: AtomicUsize::new(0),
+            done: AtomicUsize::new(0),
             parked: (0..n).map(|_| AtomicBool::new(false)).collect(),
             panicked: AtomicBool::new(false),
+            panic: Mutex::new(None),
             stop: AtomicBool::new(false),
         });
         let start = Arc::new(start);
@@ -104,6 +128,9 @@ impl Team {
 
     /// Run `f(k)` for every `k` in `0..tasks`, spread over the team, and
     /// return when all have finished. Must not be called from inside a job.
+    ///
+    /// Every task runs exactly once, also when some of them panic; the
+    /// first panic is then resumed here.
     pub fn run(&self, tasks: usize, f: &(dyn Fn(usize) + Sync)) {
         if tasks == 0 {
             return;
@@ -114,14 +141,28 @@ impl Team {
             }
             return;
         }
+        if tasks > MAX_TASKS {
+            let per = tasks.div_ceil(MAX_TASKS);
+            return self.run(tasks.div_ceil(per), &|g| {
+                let mut first = None;
+                for k in g * per..((g + 1) * per).min(tasks) {
+                    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(k)));
+                    first = first.or(r.err());
+                }
+                if let Some(p) = first {
+                    std::panic::resume_unwind(p);
+                }
+            });
+        }
         assert!(
             !self.running.swap(true, Ordering::Acquire),
             "Team::run inside a job, or from two threads at once"
         );
         let s = &*self.shared;
-        // SAFETY: no worker is inside a job (the last `run` waited for
-        // `pending == 0`), so nobody reads `job` now. The pointer is only
-        // used until this function returns, and `f` outlives that.
+        // SAFETY: every task of the previous job has finished and none of
+        // this one can be claimed before the claim word below is published,
+        // so nobody reads `job` now. The pointer is used only by threads
+        // holding a claimed task, and this function waits for all of them.
         unsafe {
             let p: *const (dyn Fn(usize) + Sync + '_) = f;
             *s.job.get() = Some(core::mem::transmute::<
@@ -129,19 +170,22 @@ impl Team {
                 *const Job,
             >(p));
         }
-        s.tasks.store(tasks, Ordering::Relaxed);
-        s.next.store(0, Ordering::Relaxed);
-        s.pending.store(self.workers.len(), Ordering::Relaxed);
-        s.epoch.fetch_add(1, Ordering::Release);
+        s.done.store(0, Ordering::Relaxed);
+        let epoch = s.epoch.load(Ordering::Relaxed) + 1;
+        s.claim.store(claim_word(epoch, tasks), Ordering::Release);
+        // SeqCst, as the worker's `parked` store and epoch re-check are:
+        // either it sees this epoch and does not park, or we see it parked.
+        s.epoch.store(epoch, Ordering::SeqCst);
         for (k, (_, t)) in self.workers.iter().enumerate() {
-            if s.parked[k].load(Ordering::Acquire) {
+            if s.parked[k].load(Ordering::SeqCst) {
                 t.unpark();
             }
         }
-        // A panic here must still wait for the workers, which use `f`.
-        let mine = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(s, f)));
+        work(s, epoch);
+        // Wait for the tasks, not for the workers: one that is asleep or
+        // descheduled and has claimed nothing does not hold the job up.
         let mut spins = 0u32;
-        while s.pending.load(Ordering::Acquire) != 0 {
+        while s.done.load(Ordering::Acquire) < tasks {
             spins += 1;
             if spins < 1 << 16 {
                 core::hint::spin_loop();
@@ -149,15 +193,18 @@ impl Team {
                 thread::yield_now();
             }
         }
-        // SAFETY: every worker has finished with the job.
+        // SAFETY: every task has finished, and no claim of this job can
+        // succeed any more: its claim word says all are taken.
         unsafe { *s.job.get() = None };
+        let panic = if s.panicked.load(Ordering::Relaxed) {
+            s.panicked.store(false, Ordering::Relaxed);
+            s.panic.lock().unwrap_or_else(|e| e.into_inner()).take()
+        } else {
+            None
+        };
         self.running.store(false, Ordering::Release);
-        if let Err(p) = mine {
-            s.panicked.store(false, Ordering::Release);
+        if let Some(p) = panic {
             std::panic::resume_unwind(p);
-        }
-        if s.panicked.swap(false, Ordering::AcqRel) {
-            panic!("a team job panicked");
         }
     }
 
@@ -180,15 +227,47 @@ impl Team {
     }
 }
 
-fn work(s: &Shared, f: &(dyn Fn(usize) + Sync + '_)) {
-    let n = s.tasks.load(Ordering::Relaxed);
+/// Claim and run tasks of job `epoch` until none are left.
+fn work(s: &Shared, epoch: u64) {
+    let tag = epoch & EPOCH_MASK;
+    let mut c = s.claim.load(Ordering::Acquire);
     loop {
-        let k = s.next.fetch_add(1, Ordering::Relaxed);
-        if k >= n {
-            break;
+        let (n, k) = ((c >> NEXT_BITS) & FIELD, c & FIELD);
+        if c >> TAG_SHIFT != tag || k >= n {
+            return;
         }
-        f(k);
+        if let Err(now) =
+            s.claim
+                .compare_exchange_weak(c, c + 1, Ordering::Acquire, Ordering::Acquire)
+        {
+            c = now;
+            continue;
+        }
+        run_task(s, k as usize);
+        c = s.claim.load(Ordering::Acquire);
     }
+}
+
+/// Run task `k` of the current job, which this thread has claimed, and
+/// count it done.
+fn run_task(s: &Shared, k: usize) {
+    {
+        // SAFETY: task `k` is ours, so `run` is still waiting for it and
+        // the job it stored before publishing the claim word (which our
+        // claim read with Acquire) is alive and visible. The reference ends
+        // with this block, before the task is counted.
+        let f = unsafe { &*(*s.job.get()).expect("team job") };
+        if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(k))) {
+            let mut slot = s.panic.lock().unwrap_or_else(|e| e.into_inner());
+            if slot.is_none() {
+                *slot = Some(p);
+            }
+            s.panicked.store(true, Ordering::Relaxed);
+        }
+    }
+    // Release: `run` reads the task's effects, and `panicked`, once it has
+    // seen every task counted.
+    s.done.fetch_add(1, Ordering::Release);
 }
 
 fn worker(s: &Shared, me: usize) {
@@ -211,22 +290,17 @@ fn worker(s: &Shared, me: usize) {
                 core::hint::spin_loop();
                 continue;
             }
-            s.parked[me].store(true, Ordering::Release);
+            s.parked[me].store(true, Ordering::SeqCst);
             // Re-check after announcing, so a job posted in between is not
             // missed; `unpark` before `park` makes `park` return at once.
-            if s.epoch.load(Ordering::Acquire) == seen && !s.stop.load(Ordering::Acquire) {
+            if s.epoch.load(Ordering::SeqCst) == seen && !s.stop.load(Ordering::Acquire) {
                 thread::park_timeout(Duration::from_millis(50));
             }
-            s.parked[me].store(false, Ordering::Release);
+            s.parked[me].store(false, Ordering::Relaxed);
         }
-        // SAFETY: the epoch moved, so `run` stored the job before bumping
-        // it (Release) and keeps it alive until `pending` reaches zero.
-        let job = unsafe { (*s.job.get()).expect("team job") };
-        let f = unsafe { &*job };
-        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(s, f))).is_err() {
-            s.panicked.store(true, Ordering::Release);
-        }
-        s.pending.fetch_sub(1, Ordering::AcqRel);
+        // A late wake-up finds the job's tasks all taken, or a later job's
+        // claim word, and goes back to waiting.
+        work(s, seen);
     }
 }
 
@@ -362,6 +436,7 @@ views_tuple!(A 0, B 1, C 2, D 3, E 4, F 5, G 6);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU8, AtomicU32};
 
     #[test]
     fn every_chunk_once_at_any_size() {
@@ -406,6 +481,126 @@ mod tests {
             thread::sleep(SPIN * 2);
         }
         assert_eq!(hits.load(Ordering::Relaxed), 300);
+    }
+
+    /// Runs `jobs` jobs of 2..=40 tasks and checks every index ran once.
+    fn each_index_once(team: &Team, jobs: usize) {
+        let hits: Vec<AtomicU32> = (0..40).map(|_| AtomicU32::new(0)).collect();
+        for j in 0..jobs {
+            let n = 2 + (j * 7919) % 39;
+            team.run(n, &|k| {
+                hits[k].fetch_add(1, Ordering::Relaxed);
+            });
+            for (k, h) in hits.iter().enumerate() {
+                assert_eq!(h.swap(0, Ordering::Relaxed), (k < n) as u32, "job {j}");
+            }
+        }
+    }
+
+    #[test]
+    fn many_short_jobs_run_each_index_once() {
+        for threads in [2, 4, 8] {
+            each_index_once(&Team::new(threads), 20_000);
+        }
+    }
+
+    #[test]
+    fn claims_survive_the_epoch_tag_wrapping() {
+        let team = Team::new(4);
+        team.shared.epoch.store(EPOCH_MASK - 3, Ordering::Relaxed);
+        each_index_once(&team, 100);
+        assert!(team.shared.epoch.load(Ordering::Relaxed) > EPOCH_MASK);
+    }
+
+    #[test]
+    fn jobs_do_not_wait_for_late_workers() {
+        // Every worker starts late, as if descheduled: the caller runs the
+        // jobs alone meanwhile, and the latecomers then wake to finished
+        // jobs and must neither run their tasks again nor hold anything up.
+        let late = Duration::from_millis(400);
+        let team = Team::with_start(4, move || thread::sleep(late));
+        let t0 = Instant::now();
+        each_index_once(&team, 200);
+        assert!(t0.elapsed() < late, "a job waited for a worker");
+        thread::sleep(late + Duration::from_millis(50));
+        each_index_once(&team, 2_000);
+        // The workers take part again once they are up.
+        let names = Mutex::new(std::collections::BTreeSet::new());
+        for _ in 0..100 {
+            team.run(16, &|_| {
+                thread::sleep(Duration::from_micros(200));
+                let me = thread::current().name().map(str::to_owned);
+                names.lock().unwrap().insert(me);
+            });
+            if names.lock().unwrap().len() > 1 {
+                return;
+            }
+        }
+        panic!("no worker took part");
+    }
+
+    fn message(p: &Panic) -> &str {
+        p.downcast_ref::<&str>()
+            .copied()
+            .or_else(|| p.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("?")
+    }
+
+    #[test]
+    fn panics_reach_the_caller_after_every_task_ran() {
+        let team = Team::new(4);
+        for bad in [0, 13, 63] {
+            let hits: Vec<AtomicU32> = (0..64).map(|_| AtomicU32::new(0)).collect();
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                team.run(64, &|k| {
+                    hits[k].fetch_add(1, Ordering::Relaxed);
+                    thread::sleep(Duration::from_micros(50));
+                    if k == bad || (bad == 0 && k % 2 == 1) {
+                        panic!("task {k}");
+                    }
+                })
+            }));
+            let p = r.expect_err("the panic is resumed");
+            assert!(message(&p).starts_with("task "));
+            assert!(hits.iter().all(|h| h.load(Ordering::Relaxed) == 1));
+            // The team is usable again, with no stale panic left behind.
+            each_index_once(&team, 100);
+        }
+    }
+
+    #[test]
+    fn a_job_inside_a_job_panics_and_leaves_the_team_usable() {
+        let team = Team::new(3);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            install(&team, || {
+                team.run(8, &|_| with_current(|t| t.run(4, &|_| {})));
+            })
+        }));
+        // Workers have no team installed, so only the caller's tasks nest.
+        if let Err(p) = r {
+            assert!(message(&p).starts_with("Team::run inside a job"));
+        }
+        each_index_once(&team, 100);
+    }
+
+    #[test]
+    fn jobs_bigger_than_a_claim_word_are_grouped() {
+        let team = Team::new(4);
+        let n = 2 * MAX_TASKS + 5;
+        let hits: Vec<AtomicU8> = (0..n).map(|_| AtomicU8::new(0)).collect();
+        team.run(n, &|k| {
+            hits[k].fetch_add(1, Ordering::Relaxed);
+        });
+        assert!(hits.iter().all(|h| h.swap(0, Ordering::Relaxed) == 1));
+        // A panic still lets the rest of its group run.
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            team.run(n, &|k| {
+                hits[k].fetch_add(1, Ordering::Relaxed);
+                assert!(k != 1000, "task 1000");
+            })
+        }));
+        assert_eq!(message(&r.expect_err("the panic is resumed")), "task 1000");
+        assert!(hits.iter().all(|h| h.load(Ordering::Relaxed) == 1));
     }
 }
 
