@@ -170,10 +170,25 @@ pub fn vnoise(u: f32, v: f32, period: i32, seed: u32) -> f32 {
     let (fx, fy) = (x - x0, y - y0);
     let s = |t: f32| t * t * (3.0 - 2.0 * t);
     let (sx, sy) = (s(fx), s(fy));
-    let at = |i: i32, j: i32| rnd(i.rem_euclid(period), j.rem_euclid(period), seed);
     let (i, j) = (x0 as i32, y0 as i32);
-    let a = at(i, j) + (at(i + 1, j) - at(i, j)) * sx;
-    let b = at(i, j + 1) + (at(i + 1, j + 1) - at(i, j + 1)) * sx;
+    // A lattice index and the next one, wrapped into the tile: the same as
+    // `i.rem_euclid(period)` and `(i + 1).rem_euclid(period)` with one
+    // division (none for a power of two).
+    let wrap = |i: i32| {
+        if period <= 0 || i == i32::MAX {
+            return (i.rem_euclid(period), (i + 1).rem_euclid(period));
+        }
+        let r = if period & (period - 1) == 0 {
+            i & (period - 1)
+        } else {
+            i.rem_euclid(period)
+        };
+        (r, if r + 1 == period { 0 } else { r + 1 })
+    };
+    let ((i0, i1), (j0, j1)) = (wrap(i), wrap(j));
+    let at = |i: i32, j: i32| rnd(i, j, seed);
+    let a = at(i0, j0) + (at(i1, j0) - at(i0, j0)) * sx;
+    let b = at(i0, j1) + (at(i1, j1) - at(i0, j1)) * sx;
     a + (b - a) * sy
 }
 
@@ -311,6 +326,86 @@ impl Shape {
 
     /// Outward surface normal at `p` (numerical gradient of the distance).
     pub fn normal(&self, p: P) -> P {
+        self.prepare().normal(p)
+    }
+
+    /// The shape ready to be evaluated at many points: what [`Shape::eval`]
+    /// derives from the shape alone (a box's rotation, a polygon's winding
+    /// and edge normals) is worked out once. Its `eval` and `normal` give
+    /// exactly the shape's.
+    pub fn prepare(&self) -> Prepared<'_> {
+        let kind = match self {
+            Shape::Box(_, _, ang, _) => {
+                let (s, co) = ang.sin_cos();
+                Prep::Box(s, co)
+            }
+            Shape::Poly(pts) => {
+                let area: f32 = (0..pts.len())
+                    .map(|i| {
+                        let (a, b) = (pts[i], pts[(i + 1) % pts.len()]);
+                        a[0] * b[1] - b[0] * a[1]
+                    })
+                    .sum();
+                let sign = if area >= 0.0 { 1.0 } else { -1.0 };
+                Prep::Poly(
+                    (0..pts.len())
+                        .map(|i| {
+                            let (a, b) = (pts[i], pts[(i + 1) % pts.len()]);
+                            let e = sub(b, a);
+                            let n = [e[1] * sign, -e[0] * sign];
+                            (a, n, len(n).max(1e-9))
+                        })
+                        .collect(),
+                )
+            }
+            _ => Prep::Plain,
+        };
+        Prepared { shape: self, kind }
+    }
+}
+
+/// A [`Shape`] with its per-shape terms worked out ([`Shape::prepare`]).
+pub struct Prepared<'a> {
+    shape: &'a Shape,
+    kind: Prep,
+}
+
+enum Prep {
+    Plain,
+    /// The rotation's sine and cosine.
+    Box(f32, f32),
+    /// Per edge: start point, outward normal and its length.
+    Poly(Vec<(P, P, f32)>),
+}
+
+impl Prepared<'_> {
+    /// [`Shape::eval`], with the same operations on the same values.
+    #[inline]
+    pub fn eval(&self, p: P) -> (f32, f32) {
+        match (&self.kind, self.shape) {
+            (&Prep::Box(s, co), &Shape::Box(c, half, _, round)) => {
+                let q = sub(p, c);
+                let l = [q[0] * co + q[1] * s, -q[0] * s + q[1] * co];
+                let dx = l[0].abs() - (half[0] - round);
+                let dy = l[1].abs() - (half[1] - round);
+                let outside = len([dx.max(0.0), dy.max(0.0)]);
+                let inside = dx.max(dy).min(0.0);
+                let n = (l[0].abs() / half[0]).max(l[1].abs() / half[1]);
+                (outside + inside - round, n.min(1.0))
+            }
+            (Prep::Poly(edges), _) => {
+                let mut d = f32::NEG_INFINITY;
+                for &(a, n, nl) in edges {
+                    d = d.max(dot(sub(p, a), n) / nl);
+                }
+                (d, 0.5)
+            }
+            _ => self.shape.eval(p),
+        }
+    }
+
+    /// [`Shape::normal`]: the numerical gradient of the distance.
+    pub fn normal(&self, p: P) -> P {
         let e = 0.01;
         let dx = self.eval([p[0] + e, p[1]]).0 - self.eval([p[0] - e, p[1]]).0;
         let dy = self.eval([p[0], p[1] + e]).0 - self.eval([p[0], p[1] - e]).0;
@@ -378,8 +473,20 @@ impl Sheet {
     /// Fill a shape with a colour chosen per pixel by `f(metres, shape
     /// radius 0..1, outward normal)`. Pixels whose centre is inside are
     /// painted; tiny shapes keep at least their centre pixel.
-    pub fn fill_with(&mut self, shape: &Shape, mut f: impl FnMut(P, f32, P) -> Option<Rgb>) {
+    pub fn fill_with(&mut self, shape: &Shape, f: impl FnMut(P, f32, P) -> Option<Rgb>) {
+        self.fill_px(shape, true, f);
+    }
+
+    /// [`Sheet::fill_with`]; without `normals`, `f` gets a zero normal
+    /// (for colourings that ignore it: the normal costs four evaluations).
+    fn fill_px(
+        &mut self,
+        shape: &Shape,
+        normals: bool,
+        mut f: impl FnMut(P, f32, P) -> Option<Rgb>,
+    ) {
         let (lo, hi) = shape.bounds();
+        let prep = shape.prepare();
         let [ox, oy, w, h] = self.at;
         let to_px = |m: f32, size: usize| m * self.ppm + size as f32 * 0.5;
         let x0 = (to_px(lo[0], w) - 1.0).floor().max(0.0) as usize;
@@ -390,10 +497,14 @@ impl Sheet {
         for y in y0..y1 {
             for x in x0..x1 {
                 let p = self.metres(x, y);
-                let (d, r) = shape.eval(p);
+                let (d, r) = prep.eval(p);
                 if d * self.ppm < 0.05 {
                     any = true;
-                    let n = if r > 0.0 { shape.normal(p) } else { [0.0, 0.0] };
+                    let n = if normals && r > 0.0 {
+                        prep.normal(p)
+                    } else {
+                        [0.0, 0.0]
+                    };
                     if let Some(c) = f(p, r, n) {
                         self.img.set(ox + x, oy + y, c);
                     }
@@ -418,7 +529,7 @@ impl Sheet {
 
     /// Fill with a flat colour.
     pub fn fill(&mut self, shape: &Shape, c: Rgb) {
-        self.fill_with(shape, |_, _, _| Some(c));
+        self.fill_px(shape, false, |_, _, _| Some(c));
     }
 
     /// Fill lit from the north-west: three tones from the surface normal.
@@ -444,7 +555,7 @@ impl Sheet {
         let ppm = self.ppm;
         let w = self.at[2] as f32;
         let h = self.at[3] as f32;
-        self.fill_with(shape, |p, _, _| {
+        self.fill_px(shape, false, |p, _, _| {
             let x = (p[0] * ppm + w * 0.5) as i32 + ox as i32;
             let y = (p[1] * ppm + h * 0.5) as i32 + oy as i32;
             Some(dither(x, y, a, b, t(p)))
@@ -485,6 +596,30 @@ mod tests {
             let b = fbm(1.0, v, 4, 3, 7);
             assert!((a - b).abs() < 1e-5);
             assert!((0.0..1.0).contains(&a));
+        }
+    }
+
+    #[test]
+    fn noise_wraps_like_rem_euclid() {
+        // The noise as first written: four wrapping divisions per sample.
+        let reference = |u: f32, v: f32, period: i32, seed: u32| {
+            let (x, y) = (u * period as f32, v * period as f32);
+            let (x0, y0) = (x.floor(), y.floor());
+            let (fx, fy) = (x - x0, y - y0);
+            let s = |t: f32| t * t * (3.0 - 2.0 * t);
+            let (sx, sy) = (s(fx), s(fy));
+            let at = |i: i32, j: i32| rnd(i.rem_euclid(period), j.rem_euclid(period), seed);
+            let (i, j) = (x0 as i32, y0 as i32);
+            let a = at(i, j) + (at(i + 1, j) - at(i, j)) * sx;
+            let b = at(i, j + 1) + (at(i + 1, j + 1) - at(i, j + 1)) * sx;
+            a + (b - a) * sy
+        };
+        for period in 1..=24 {
+            for k in -300..300 {
+                let (u, v) = (k as f32 * 0.0137, k as f32 * -0.0291 + 0.5);
+                let (a, b) = (vnoise(u, v, period, 9), reference(u, v, period, 9));
+                assert_eq!(a.to_bits(), b.to_bits(), "period {period}, u {u}, v {v}");
+            }
         }
     }
 

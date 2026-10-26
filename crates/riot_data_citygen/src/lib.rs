@@ -64,7 +64,8 @@ pub struct CityParams {
     /// reaches 6000, smaller maps get proportionally fewer.
     pub max_props: u32,
     /// zlib-compress the ground layer (Tiled reads both; an 8 km city's
-    /// ground is 4 M tiles, 8 MB as a plain array).
+    /// ground is 4 M tiles, 8 MB as a plain array). Only the JSON forms are
+    /// affected: [`generate_mapdef`] never compresses.
     pub compress_ground: bool,
 }
 
@@ -118,7 +119,14 @@ pub fn generate_json(params: &CityParams) -> String {
 
 /// The city as a `MapDef`, exactly as loading [`generate`]'s JSON would give.
 pub fn generate_mapdef(params: &CityParams) -> MapDef {
-    tiled::convert(&generate_tiled(params), &params.map_name(), None)
+    // Converted in memory, so the ground layer stays a plain array: deflating
+    // it only to inflate it again took half of a scenario load. The gids,
+    // and so the map, are the same either way.
+    let plain = CityParams {
+        compress_ground: false,
+        ..params.clone()
+    };
+    tiled::convert(&generate_tiled(&plain), &params.map_name(), None)
         .expect("generated maps follow the Tiled convention")
 }
 

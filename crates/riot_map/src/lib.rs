@@ -124,10 +124,9 @@ pub struct Map {
     pub tile_rc0: Vec<u8>,
     pub mixed: Vec<MixedTile>,
     pub labels: Vec<[u8; 256]>,
-    pub seg_ax: Vec<f32>,
-    pub seg_ay: Vec<f32>,
-    pub seg_bx: Vec<f32>,
-    pub seg_by: Vec<f32>,
+    /// Wall segments: the solids' edges, then the map frame. One record per
+    /// segment, so a lookup reads one 16-byte slot.
+    pub segs: Vec<Seg>,
     pub wall_idx: Vec<u32>,
     pub region_first: Vec<u32>,
     pub rnodes: Vec<RegionNode>,
@@ -161,9 +160,11 @@ impl std::fmt::Display for MapError {
 
 impl std::error::Error for MapError {}
 
-struct Seg {
-    a: Vec2,
-    b: Vec2,
+/// A wall segment from `a` to `b`.
+#[derive(Clone, Copy, Debug)]
+pub struct Seg {
+    pub a: Vec2,
+    pub b: Vec2,
 }
 
 impl Map {
@@ -229,6 +230,8 @@ impl Map {
             });
         }
 
+        let boxes: Vec<[f32; 4]> = segs.iter().map(clear_box).collect();
+
         // --- (tile, segment) pairs for every tile within `margin` of a segment
         let tile_of =
             |v: f32| (((v + half) / TILE_M).floor() as i64).clamp(0, tdim as i64 - 1) as u32;
@@ -247,94 +250,175 @@ impl Map {
                 }
             }
         }
-        pairs.sort_unstable();
+        // The segments of each tile in segment order, as sorting the pairs
+        // would give: they were pushed in segment order, and a counting sort
+        // by tile keeps that order within a tile.
+        let ntiles = (tdim * tdim) as usize;
+        let mut tile_start = vec![0u32; ntiles + 1];
+        for &(t, _) in &pairs {
+            tile_start[t as usize + 1] += 1;
+        }
+        for t in 0..ntiles {
+            tile_start[t + 1] += tile_start[t];
+        }
+        let mut tile_seg = vec![0u32; pairs.len()];
+        let mut fill = tile_start.clone();
+        for &(t, s) in &pairs {
+            tile_seg[fill[t as usize] as usize] = s;
+            fill[t as usize] += 1;
+        }
+        drop((pairs, fill));
+        let segs_of = |t: u32| {
+            &tile_seg[tile_start[t as usize] as usize..tile_start[t as usize + 1] as usize]
+        };
 
         // --- rasterize per tile row, in parallel
+        /// A tile row: `kinds` holds OPEN, BLOCKED or MIXED_HERE; the mixed
+        /// tiles' wall ranges and label indices point into the row's own
+        /// `walls` and `labels` until the rows are joined.
         struct RowOut {
             kinds: Vec<u32>,
-            mixed: Vec<(MixedTile, [Vec<u32>; 4], Option<[u8; 256]>)>,
+            mixed: Vec<MixedTile>,
+            walls: Vec<u32>,
+            labels: Vec<[u8; 256]>,
         }
+        const MIXED_HERE: u32 = u32::MAX - 2;
         let rows: Vec<RowOut> = (0..tdim)
             .into_par_iter()
             .map(|ty| {
-                let lo = pairs.partition_point(|p| p.0 < ty << tshift);
-                let hi = pairs.partition_point(|p| p.0 < (ty + 1) << tshift);
-                let row_pairs = &pairs[lo..hi];
-                // Signed crossings of each cell row's centre line, sorted by x.
-                let mut cross: [Vec<(f32, i32)>; TILE as usize] = Default::default();
-                for &(t, s) in row_pairs {
-                    if s as usize >= solid_segs {
-                        continue;
-                    }
-                    let tx = t & (tdim - 1);
-                    let seg = &segs[s as usize];
-                    for (ly, c) in cross.iter_mut().enumerate() {
-                        let y = (ty * TILE + ly as u32) as f32 * NAV_CELL + NAV_CELL * 0.5 - half;
-                        let sign = if seg.a.y <= y && y < seg.b.y {
-                            1
-                        } else if seg.b.y <= y && y < seg.a.y {
-                            -1
-                        } else {
+                // Signed crossings of each cell row's centre line, sorted by x
+                // (as `cross_key`s, then decoded).
+                let mut keys: [Vec<u64>; TILE as usize] = Default::default();
+                for tx in 0..tdim {
+                    for &s in segs_of((ty << tshift) | tx) {
+                        if s as usize >= solid_segs {
                             continue;
-                        };
-                        let xc =
-                            seg.a.x + (y - seg.a.y) / (seg.b.y - seg.a.y) * (seg.b.x - seg.a.x);
-                        if tile_of(xc) == tx {
-                            c.push((xc, sign));
+                        }
+                        let seg = &segs[s as usize];
+                        for (ly, c) in keys.iter_mut().enumerate() {
+                            let y =
+                                (ty * TILE + ly as u32) as f32 * NAV_CELL + NAV_CELL * 0.5 - half;
+                            let sign = if seg.a.y <= y && y < seg.b.y {
+                                1
+                            } else if seg.b.y <= y && y < seg.a.y {
+                                -1
+                            } else {
+                                continue;
+                            };
+                            let xc =
+                                seg.a.x + (y - seg.a.y) / (seg.b.y - seg.a.y) * (seg.b.x - seg.a.x);
+                            if tile_of(xc) == tx {
+                                c.push(cross_key(xc, sign));
+                            }
                         }
                     }
                 }
-                for c in cross.iter_mut() {
-                    c.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-                }
+                let cross = keys.map(|mut k| {
+                    k.sort_unstable();
+                    k.into_iter().map(cross_of_key).collect::<Vec<_>>()
+                });
                 let mut ptr = [0usize; TILE as usize];
                 let mut wind = [0i32; TILE as usize];
+                let mut seg_cols: Vec<u16> = Vec::new();
                 let mut out = RowOut {
                     kinds: Vec::with_capacity(tdim as usize),
                     mixed: Vec::new(),
+                    walls: Vec::new(),
+                    labels: Vec::new(),
                 };
-                let mut pi = 0usize;
                 for tx in 0..tdim {
-                    let t = (ty << tshift) | tx;
-                    let p0 = pi;
-                    while pi < row_pairs.len() && row_pairs[pi].0 == t {
-                        pi += 1;
-                    }
-                    let tile_segs = &row_pairs[p0..pi];
+                    let tile_segs = segs_of((ty << tshift) | tx);
                     let x0 = tx as f32 * TILE_M - half;
                     let y0 = ty as f32 * TILE_M - half;
-                    let mut bits = [0u64; 4];
-                    let mut any_open = false;
-                    for ly in 0..TILE as usize {
-                        let y = y0 + (ly as f32 + 0.5) * NAV_CELL;
-                        for lx in 0..TILE as usize {
-                            let x = x0 + (lx as f32 + 0.5) * NAV_CELL;
-                            let c = &cross[ly];
-                            while ptr[ly] < c.len() && c[ptr[ly]].0 < x {
-                                wind[ly] += c[ptr[ly]].1;
-                                ptr[ly] += 1;
-                            }
-                            let mut open = wind[ly] == 0 && x > -hw && x < hw && y > -hh && y < hh;
-                            if open {
-                                let p = Vec2::new(x, y);
-                                for &(_, s) in tile_segs {
-                                    let seg = &segs[s as usize];
-                                    if (riot_core::math::closest_on_segment(p, seg.a, seg.b) - p)
-                                        .len2()
-                                        < CLEARANCE * CLEARANCE
-                                    {
-                                        open = false;
-                                        break;
-                                    }
-                                }
-                            }
-                            if open {
-                                let bit = ly * 16 + lx;
-                                bits[bit >> 6] |= 1 << (bit & 63);
-                                any_open = true;
-                            }
+                    // Cell centres of the tile's columns, and the columns
+                    // inside the map. The centres never decrease with `lx`.
+                    let mut xs = [0.0f32; TILE as usize];
+                    let mut cols_in = 0u16;
+                    for (lx, x) in xs.iter_mut().enumerate() {
+                        *x = x0 + (lx as f32 + 0.5) * NAV_CELL;
+                        if *x > -hw && *x < hw {
+                            cols_in |= 1 << lx;
                         }
                     }
+                    // The columns whose centre is inside each segment's
+                    // clearance box. A cell outside the box is farther than
+                    // CLEARANCE from the segment, so its clearance test
+                    // below would fail anyway (see `clear_box`).
+                    seg_cols.clear();
+                    seg_cols.extend(tile_segs.iter().map(|&s| {
+                        let b = &boxes[s as usize];
+                        let mut cols = 0u16;
+                        for (lx, &x) in xs.iter().enumerate() {
+                            if !(x < b[0] || x > b[1]) {
+                                cols |= 1 << lx;
+                            }
+                        }
+                        cols
+                    }));
+                    let mut bits = [0u64; 4];
+                    for ly in 0..TILE as usize {
+                        let y = y0 + (ly as f32 + 0.5) * NAV_CELL;
+                        // Winding of each cell: the crossings left of its centre.
+                        let c = &cross[ly];
+                        let (mut p, mut w) = (ptr[ly], wind[ly]);
+                        while p < c.len() && c[p].0 < xs[0] {
+                            w += c[p].1;
+                            p += 1;
+                        }
+                        let last = xs[TILE as usize - 1];
+                        let mut row = if p == c.len() || c[p].0 >= last {
+                            // No crossing up to the last centre: one winding.
+                            if w == 0 { u16::MAX } else { 0 }
+                        } else {
+                            // A crossing counts for the cells whose centre is
+                            // right of it, `k..16`; the crossings are sorted,
+                            // so the winding steps at each one in turn.
+                            let mut row = 0u32;
+                            let mut from = 0;
+                            while p < c.len() && c[p].0 < last {
+                                let x = c[p].0;
+                                let k = xs.iter().filter(|&&cx| cx <= x).count();
+                                if w == 0 {
+                                    row |= (1 << k) - (1 << from);
+                                }
+                                (from, w, p) = (k, w + c[p].1, p + 1);
+                            }
+                            if w == 0 {
+                                row |= (1 << TILE) - (1 << from);
+                            }
+                            row as u16
+                        };
+                        (ptr[ly], wind[ly]) = (p, w);
+                        if !(y > -hh && y < hh) {
+                            row = 0;
+                        }
+                        row &= cols_in;
+                        // Clearance: no wall closer than CLEARANCE. Only the
+                        // cells inside a segment's box need the exact test.
+                        for (&s, &cols) in tile_segs.iter().zip(&seg_cols) {
+                            if row == 0 {
+                                break;
+                            }
+                            let b = &boxes[s as usize];
+                            if y < b[2] || y > b[3] {
+                                continue;
+                            }
+                            let mut cand = row & cols;
+                            let seg = &segs[s as usize];
+                            while cand != 0 {
+                                let lx = cand.trailing_zeros() as usize;
+                                cand &= cand - 1;
+                                let p = Vec2::new(xs[lx], y);
+                                if (riot_core::math::closest_on_segment(p, seg.a, seg.b) - p).len2()
+                                    < CLEARANCE * CLEARANCE
+                                {
+                                    row &= !(1 << lx);
+                                }
+                            }
+                        }
+                        bits[ly >> 2] |= (row as u64) << ((ly & 3) * 16);
+                    }
+                    let any_open = bits != [0; 4];
                     if !any_open {
                         out.kinds.push(BLOCKED);
                         continue;
@@ -344,60 +428,66 @@ impl Map {
                         continue;
                     }
                     // Wall lists per 4 m sub-cell.
-                    let mut lists: [Vec<u32>; 4] = Default::default();
-                    for (q, list) in lists.iter_mut().enumerate() {
+                    let mut walls = [[0u32; 2]; 4];
+                    for (q, range) in walls.iter_mut().enumerate() {
                         let bmin = Vec2::new(x0 + (q & 1) as f32 * 4.0, y0 + (q >> 1) as f32 * 4.0);
                         let bmax = bmin + Vec2::new(4.0, 4.0);
-                        for &(_, s) in tile_segs {
+                        range[0] = out.walls.len() as u32;
+                        for &s in tile_segs {
                             let seg = &segs[s as usize];
-                            if seg_box_dist2(seg.a, seg.b, bmin, bmax) <= margin * margin {
-                                list.push(s);
+                            if seg_box_near(seg, bmin, bmax, margin) {
+                                out.walls.push(s);
                             }
                         }
+                        range[1] = out.walls.len() as u32;
                     }
                     let (ncomp, labels) = components(&mut bits);
-                    out.kinds.push(u32::MAX - 2); // patched below
-                    out.mixed.push((
-                        MixedTile {
-                            bits,
-                            walls: [[0; 2]; 4],
-                            labels: NO_LABELS,
-                            ncomp,
-                            rc: [NO_RC; MAX_COMP],
-                            links: [0; 4],
-                        },
-                        lists,
-                        if ncomp > 1 { Some(labels) } else { None },
-                    ));
+                    let labels = labels.map_or(NO_LABELS, |l| {
+                        out.labels.push(l);
+                        out.labels.len() as u32 - 1
+                    });
+                    out.kinds.push(MIXED_HERE);
+                    out.mixed.push(MixedTile {
+                        bits,
+                        walls,
+                        labels,
+                        ncomp,
+                        rc: [NO_RC; MAX_COMP],
+                        links: [0; 4],
+                    });
                 }
                 out
             })
             .collect();
 
+        // Join the rows in order: the arrays come out as if built tile by tile.
         let mut tiles = Vec::with_capacity((tdim * tdim) as usize);
-        let mut mixed = Vec::new();
-        let mut labels = Vec::new();
-        let mut wall_idx = Vec::new();
+        let mut mixed = Vec::with_capacity(rows.iter().map(|r| r.mixed.len()).sum());
+        let mut labels = Vec::with_capacity(rows.iter().map(|r| r.labels.len()).sum());
+        let mut wall_idx = Vec::with_capacity(rows.iter().map(|r| r.walls.len()).sum());
         for row in rows {
-            let mut m = row.mixed.into_iter();
+            let (w0, l0) = (wall_idx.len() as u32, labels.len() as u32);
+            let mut m = mixed.len() as u32;
             for k in row.kinds {
-                if k == u32::MAX - 2 {
-                    let (mut mt, lists, lab) = m.next().unwrap();
-                    for (q, list) in lists.iter().enumerate() {
-                        let s = wall_idx.len() as u32;
-                        wall_idx.extend_from_slice(list);
-                        mt.walls[q] = [s, wall_idx.len() as u32];
-                    }
-                    if let Some(l) = lab {
-                        mt.labels = labels.len() as u32;
-                        labels.push(l);
-                    }
-                    tiles.push(mixed.len() as u32);
-                    mixed.push(mt);
+                if k == MIXED_HERE {
+                    tiles.push(m);
+                    m += 1;
                 } else {
                     tiles.push(k);
                 }
             }
+            mixed.extend(row.mixed.into_iter().map(|mut mt| {
+                for range in &mut mt.walls {
+                    range[0] += w0;
+                    range[1] += w0;
+                }
+                if mt.labels != NO_LABELS {
+                    mt.labels += l0;
+                }
+                mt
+            }));
+            wall_idx.extend_from_slice(&row.walls);
+            labels.extend_from_slice(&row.labels);
         }
 
         let mut map = Map {
@@ -414,10 +504,7 @@ impl Map {
             tile_rc0: Vec::new(),
             mixed,
             labels,
-            seg_ax: segs.iter().map(|s| s.a.x).collect(),
-            seg_ay: segs.iter().map(|s| s.a.y).collect(),
-            seg_bx: segs.iter().map(|s| s.b.x).collect(),
-            seg_by: segs.iter().map(|s| s.b.y).collect(),
+            segs,
             wall_idx,
             region_first: Vec::new(),
             rnodes: Vec::new(),
@@ -555,45 +642,76 @@ impl Map {
         }
     }
 
+    /// Component of each cell along one side of a tile (0 +x, 1 -x, 2 +y,
+    /// 3 -y), in order along the side, `NO_RC` where not walkable: the
+    /// `comp_of` of those cells.
+    fn border_comps(&self, t: u32, side: usize) -> [u8; TILE as usize] {
+        let m = match self.tiles[t as usize] {
+            OPEN => return [0; TILE as usize],
+            BLOCKED => return [NO_RC; TILE as usize],
+            m => &self.mixed[m as usize],
+        };
+        let labels = (m.labels != NO_LABELS).then(|| &self.labels[m.labels as usize]);
+        std::array::from_fn(|k| {
+            let k = k as u32;
+            let bit = match side {
+                0 => k * 16 + 15,
+                1 => k * 16,
+                2 => 15 * 16 + k,
+                _ => k,
+            };
+            if !m.walkable(bit) {
+                NO_RC
+            } else {
+                labels.map_or(0, |l| l[bit as usize])
+            }
+        })
+    }
+
+    /// Links of every mixed tile across its four borders, in parallel per
+    /// tile row: each depends only on the bits and labels of the tile and its
+    /// neighbours.
     fn build_links(&mut self) {
-        let mut out: Vec<(usize, [u16; 4])> = Vec::with_capacity(self.mixed.len());
-        for t in 0..self.tiles.len() as u32 {
-            let m = self.tiles[t as usize];
-            if m == OPEN || m == BLOCKED {
-                continue;
-            }
-            let (tx, ty) = (t & (self.tdim - 1), t >> self.tshift);
-            let mut links = [0u16; 4];
-            for (dir, l) in links.iter_mut().enumerate() {
-                if self.neighbour_tile(t, dir).is_none() {
-                    continue;
-                }
-                for k in 0..TILE {
-                    let (a, b) = match dir {
-                        0 => (
-                            (tx * TILE + 15, ty * TILE + k),
-                            ((tx + 1) * TILE, ty * TILE + k),
-                        ),
-                        1 => ((tx * TILE, ty * TILE + k), (tx * TILE - 1, ty * TILE + k)),
-                        2 => (
-                            (tx * TILE + k, ty * TILE + 15),
-                            (tx * TILE + k, (ty + 1) * TILE),
-                        ),
-                        _ => ((tx * TILE + k, ty * TILE), (tx * TILE + k, ty * TILE - 1)),
-                    };
-                    if let (Some(ca), Some(cb)) = (self.comp_of(a.0, a.1), self.comp_of(b.0, b.1)) {
-                        *l |= 1 << (ca * 4 + cb);
+        let this = &*self;
+        let rows: Vec<Vec<[u16; 4]>> = (0..this.tdim)
+            .into_par_iter()
+            .map(|ty| {
+                let mut out = Vec::new();
+                for tx in 0..this.tdim {
+                    let t = this.tile_index(tx, ty);
+                    let m = this.tiles[t as usize];
+                    if m == OPEN || m == BLOCKED {
+                        continue;
                     }
+                    let mut links = [0u16; 4];
+                    for (dir, l) in links.iter_mut().enumerate() {
+                        let Some(nt) = this.neighbour_tile(t, dir) else {
+                            continue;
+                        };
+                        // The cells facing each other across the border.
+                        let (a, b) = (this.border_comps(t, dir), this.border_comps(nt, dir ^ 1));
+                        for (&ca, &cb) in a.iter().zip(&b) {
+                            if ca != NO_RC && cb != NO_RC {
+                                *l |= 1 << (ca * 4 + cb);
+                            }
+                        }
+                    }
+                    out.push(links);
                 }
-            }
-            out.push((m as usize, links));
+                out
+            })
+            .collect();
+        // Mixed tiles are numbered in tile order, as the rows are.
+        let mut mixed = self.mixed.iter_mut();
+        for links in rows.into_iter().flatten() {
+            mixed.next().expect("one link set per mixed tile").links = links;
         }
-        for (m, links) in out {
-            self.mixed[m].links = links;
-        }
+        debug_assert!(mixed.next().is_none());
     }
 
     /// Wall segments near a point: the list of the 4 m sub-cell containing it.
+    /// Always inlined: bodies and steering call it about five times per
+    /// person per tick, and inlined the map's fields stay in registers.
     #[inline(always)]
     pub fn walls_near(&self, p: Vec2) -> &[u32] {
         let fx = (p.x + self.half) * (1.0 / 4.0);
@@ -615,13 +733,10 @@ impl Map {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn segment(&self, s: u32) -> (Vec2, Vec2) {
-        let s = s as usize;
-        (
-            Vec2::new(self.seg_ax[s], self.seg_ay[s]),
-            Vec2::new(self.seg_bx[s], self.seg_by[s]),
-        )
+        let seg = self.segs[s as usize];
+        (seg.a, seg.b)
     }
 
     /// Does the straight segment `a → b` cross a wall? Walks the 4 m
@@ -707,37 +822,30 @@ impl Map {
                 let key = |lx: u32, ly: u32, c: u8| {
                     ((ly * REGION + lx) as usize * MAX_COMP + c as usize) as u16
                 };
+                // Join the components that touch across the +x and +y borders
+                // inside the region: the links `build_links` found along the
+                // border cells. Union by minimum keeps every root the
+                // smallest key of its set whatever the order of the unions,
+                // so the ids below depend only on the partition.
                 for ly in 0..REGION {
                     for lx in 0..REGION {
-                        let (tx, ty) = (rx * REGION + lx, ry * REGION + ly);
-                        for (dx, dy) in [(1u32, 0u32), (0, 1)] {
-                            let (nx, ny) = (lx + dx, ly + dy);
+                        let t = this.tile_index(rx * REGION + lx, ry * REGION + ly);
+                        for (dir, nx, ny) in [(0, lx + 1, ly), (2, lx, ly + 1)] {
                             if nx >= REGION || ny >= REGION {
                                 continue;
                             }
-                            for k in 0..TILE {
-                                let (ca, cb) = if dx == 1 {
-                                    (
-                                        (tx * TILE + 15, ty * TILE + k),
-                                        ((tx + 1) * TILE, ty * TILE + k),
-                                    )
-                                } else {
-                                    (
-                                        (tx * TILE + k, ty * TILE + 15),
-                                        (tx * TILE + k, (ty + 1) * TILE),
-                                    )
-                                };
-                                if let (Some(a), Some(b)) =
-                                    (this.comp_of(ca.0, ca.1), this.comp_of(cb.0, cb.1))
-                                {
-                                    let (ra, rb) = (
-                                        find(&mut parent, key(lx, ly, a)),
-                                        find(&mut parent, key(nx, ny, b)),
-                                    );
-                                    if ra != rb {
-                                        let (lo, hi) = if ra < rb { (ra, rb) } else { (rb, ra) };
-                                        parent[hi as usize] = lo;
-                                    }
+                            let mut l = this.tile_links(t, dir);
+                            while l != 0 {
+                                let bit = l.trailing_zeros();
+                                l &= l - 1;
+                                let (a, b) = ((bit / 4) as u8, (bit % 4) as u8);
+                                let (ra, rb) = (
+                                    find(&mut parent, key(lx, ly, a)),
+                                    find(&mut parent, key(nx, ny, b)),
+                                );
+                                if ra != rb {
+                                    let (lo, hi) = if ra < rb { (ra, rb) } else { (rb, ra) };
+                                    parent[hi as usize] = lo;
                                 }
                             }
                         }
@@ -811,12 +919,12 @@ impl Map {
         }
         self.region_first.push(self.rnodes.len() as u32);
 
-        // Region adjacency across region borders.
+        // Region adjacency across region borders, from the tile links (the
+        // sort and dedup make the list independent of the push order).
         let mut edges: Vec<(u32, u32)> = Vec::new();
         for ty in 0..tdim {
             for tx in 0..tdim {
-                for (dx, dy) in [(1u32, 0u32), (0, 1)] {
-                    let (nx, ny) = (tx + dx, ty + dy);
+                for (dir, nx, ny) in [(0, tx + 1, ty), (2, tx, ty + 1)] {
                     if nx >= tdim
                         || ny >= tdim
                         || (nx / REGION == tx / REGION && ny / REGION == ty / REGION)
@@ -824,20 +932,12 @@ impl Map {
                         continue;
                     }
                     let (ta, tb) = (self.tile_index(tx, ty), self.tile_index(nx, ny));
-                    if self.tile_ncomp(ta) == 0 || self.tile_ncomp(tb) == 0 {
-                        continue;
-                    }
-                    for k in 0..TILE {
-                        let (ca, cb) = if dx == 1 {
-                            ((tx * TILE + 15, ty * TILE + k), (nx * TILE, ty * TILE + k))
-                        } else {
-                            ((tx * TILE + k, ty * TILE + 15), (tx * TILE + k, ny * TILE))
-                        };
-                        if let (Some(a), Some(b)) =
-                            (self.comp_of(ca.0, ca.1), self.comp_of(cb.0, cb.1))
-                            && let (Some(na), Some(nb)) =
-                                (self.rnode_of(ta, a), self.rnode_of(tb, b))
-                        {
+                    let mut l = self.tile_links(ta, dir);
+                    while l != 0 {
+                        let bit = l.trailing_zeros();
+                        l &= l - 1;
+                        let (a, b) = ((bit / 4) as u8, (bit % 4) as u8);
+                        if let (Some(na), Some(nb)) = (self.rnode_of(ta, a), self.rnode_of(tb, b)) {
                             edges.push((na, nb));
                             edges.push((nb, na));
                         }
@@ -957,7 +1057,7 @@ impl Map {
             + self.tile_rc0.len()
             + self.mixed.len() * std::mem::size_of::<MixedTile>()
             + self.labels.len() * 256
-            + self.seg_ax.len() * 16
+            + self.segs.len() * std::mem::size_of::<Seg>()
             + self.wall_idx.len() * 4
             + self.rnodes.len() * std::mem::size_of::<RegionNode>()
             + self.radj.len() * 8
@@ -976,6 +1076,60 @@ pub fn transpose_links(m: u16) -> u16 {
         }
     }
     out
+}
+
+/// A key whose unsigned order is the order of `(x, sign)` by `f32::total_cmp`
+/// then `i32::cmp`, so sorting keys sorts crossings exactly as comparing
+/// them would (equal keys are equal crossings). The `x` part is the
+/// `total_cmp` key moved from signed to unsigned order.
+#[inline]
+fn cross_key(x: f32, sign: i32) -> u64 {
+    let b = x.to_bits() as i32;
+    let k = (b ^ (((b >> 31) as u32) >> 1) as i32) as u32 ^ (1 << 31);
+    ((k as u64) << 32) | (sign as u32 ^ (1 << 31)) as u64
+}
+
+/// The crossing a `cross_key` was made from.
+#[inline]
+fn cross_of_key(key: u64) -> (f32, i32) {
+    let k = ((key >> 32) as u32 ^ (1 << 31)) as i32;
+    let b = k ^ (((k >> 31) as u32) >> 1) as i32;
+    (f32::from_bits(b as u32), (key as u32 ^ (1 << 31)) as i32)
+}
+
+/// The box `[x0, x1, y0, y1]` around a segment, CLEARANCE wider on each side
+/// plus slack: a point outside it is more than CLEARANCE from the segment,
+/// so the exact clearance test (`closest_on_segment`, distance squared
+/// `< CLEARANCE²`) fails for it. The slack (0.05 m) covers the rounding of
+/// that test, whose closest point can leave the segment's own box only by a
+/// few ulps of the coordinates (≤ 2 mm on an 8 km map), and of this box.
+fn clear_box(s: &Seg) -> [f32; 4] {
+    const R: f32 = CLEARANCE + 0.05;
+    [
+        s.a.x.min(s.b.x) - R,
+        s.a.x.max(s.b.x) + R,
+        s.a.y.min(s.b.y) - R,
+        s.a.y.max(s.b.y) + R,
+    ]
+}
+
+/// `seg_box_dist2(a, b, bmin, bmax) <= margin²`, skipping the exact test
+/// when the segment's bounding box is more than `margin` plus 0.05 m from the
+/// box along an axis. Then every distance that function takes is longer than
+/// `margin` and none of its edge intersections can register: rounding moves
+/// the points and intersections it computes by at most a few ulps of the
+/// coordinates (≤ 5 mm on an 8 km map), well inside the slack.
+#[inline]
+fn seg_box_near(s: &Seg, bmin: Vec2, bmax: Vec2, margin: f32) -> bool {
+    let g = margin + 0.05;
+    if s.a.x.max(s.b.x) < bmin.x - g
+        || s.a.x.min(s.b.x) > bmax.x + g
+        || s.a.y.max(s.b.y) < bmin.y - g
+        || s.a.y.min(s.b.y) > bmax.y + g
+    {
+        return false;
+    }
+    seg_box_dist2(s.a, s.b, bmin, bmax) <= margin * margin
 }
 
 /// Squared distance between a segment and an axis-aligned box.
@@ -1005,64 +1159,74 @@ fn seg_box_dist2(a: Vec2, b: Vec2, bmin: Vec2, bmax: Vec2) -> f32 {
 }
 
 /// 4-connected components of a tile bitmap, capped at `MAX_COMP`; cells of
-/// further components are cleared. Returns the count and per-cell labels.
-fn components(bits: &mut [u64; 4]) -> (u8, [u8; 256]) {
-    let mut labels = [u8::MAX; 256];
-    let get = |bits: &[u64; 4], i: usize| (bits[i >> 6] >> (i & 63)) & 1 != 0;
-    let mut n = 0u8;
-    let mut stack = [0u16; 256];
-    for start in 0..256usize {
-        if !get(bits, start) || labels[start] != u8::MAX {
-            continue;
+/// further components are cleared. Components are numbered in the order of
+/// their first cell (row-major), as a flood fill started from each unlabelled
+/// cell in turn numbers them. Returns the count and, for 2+ components, the
+/// label of every cell (0 where not walkable).
+///
+/// Works on the runs of walkable cells along each row: runs in adjacent rows
+/// that share a column are connected. Union by minimum makes every root the
+/// component's first run, so roots in run order are components in the order
+/// of their first cell.
+fn components(bits: &mut [u64; 4]) -> (u8, Option<[u8; 256]>) {
+    // A 16-cell row has at most 8 runs.
+    const MAX_RUNS: usize = (TILE * TILE / 2) as usize;
+    fn find(p: &mut [u8; MAX_RUNS], mut x: u8) -> u8 {
+        while p[x as usize] != x {
+            p[x as usize] = p[p[x as usize] as usize];
+            x = p[x as usize];
         }
-        let label = n;
-        let keep = (n as usize) < MAX_COMP;
-        let mut sp = 0;
-        stack[sp] = start as u16;
-        sp += 1;
-        labels[start] = label;
-        while sp > 0 {
-            sp -= 1;
-            let c = stack[sp] as usize;
-            let (x, y) = (c & 15, c >> 4);
-            let mut push = |nc: usize, stack: &mut [u16; 256], sp: &mut usize| {
-                if get(bits, nc) && labels[nc] == u8::MAX {
-                    labels[nc] = label;
-                    stack[*sp] = nc as u16;
-                    *sp += 1;
+        x
+    }
+    let mut runs = [0u16; MAX_RUNS];
+    let mut run_row = [0u8; MAX_RUNS];
+    let mut parent = [0u8; MAX_RUNS];
+    let mut n = 0usize;
+    let mut prev = 0..0;
+    for ly in 0..TILE as usize {
+        let mut w = (bits[ly >> 2] >> ((ly & 3) * 16)) as u16;
+        let first = n;
+        while w != 0 {
+            // The run starting at the lowest set bit (the carry clears it).
+            let run = (w ^ w.wrapping_add(w.isolate_lowest_one())) & w;
+            w &= !run;
+            (runs[n], run_row[n], parent[n]) = (run, ly as u8, n as u8);
+            for j in prev.clone() {
+                if runs[j] & run != 0 {
+                    let (a, b) = (find(&mut parent, j as u8), find(&mut parent, n as u8));
+                    parent[a.max(b) as usize] = a.min(b);
                 }
-            };
-            if x > 0 {
-                push(c - 1, &mut stack, &mut sp);
             }
-            if x < 15 {
-                push(c + 1, &mut stack, &mut sp);
-            }
-            if y > 0 {
-                push(c - 16, &mut stack, &mut sp);
-            }
-            if y < 15 {
-                push(c + 16, &mut stack, &mut sp);
-            }
-        }
-        if keep {
             n += 1;
+        }
+        prev = first..n;
+    }
+    let mut comp = [0u8; MAX_RUNS];
+    let mut count = 0usize;
+    for r in 0..n {
+        let root = find(&mut parent, r as u8) as usize;
+        if root == r {
+            comp[r] = count.min(MAX_COMP) as u8;
+            count += 1;
         } else {
+            comp[r] = comp[root];
+        }
+    }
+    let ncomp = count.min(MAX_COMP);
+    let mut labels = [0u8; 256];
+    for r in 0..n {
+        let ly = run_row[r] as usize;
+        let c = comp[r];
+        if c as usize == MAX_COMP {
             // Too many pockets: drop this one.
-            for i in 0..256 {
-                if labels[i] == label {
-                    bits[i >> 6] &= !(1 << (i & 63));
-                    labels[i] = u8::MAX - 1;
-                }
-            }
+            bits[ly >> 2] &= !((runs[r] as u64) << ((ly & 3) * 16));
+        } else if c > 0 {
+            let lx = runs[r].trailing_zeros() as usize;
+            let len = runs[r].count_ones() as usize;
+            labels[ly * 16 + lx..][..len].fill(c);
         }
     }
-    for l in labels.iter_mut() {
-        if *l >= MAX_COMP as u8 {
-            *l = 0;
-        }
-    }
-    (n, labels)
+    (ncomp as u8, (ncomp > 1).then_some(labels))
 }
 
 #[cfg(test)]
@@ -1167,7 +1331,207 @@ mod tests {
         }
         let (n, labels) = components(&mut bits);
         assert_eq!(n, 4);
-        assert_eq!(labels[6], 3);
+        assert_eq!(labels.unwrap()[6], 3);
         assert_eq!(bits[0] & (1 << 8), 0);
+    }
+
+    /// The original flood fill, which `components` must agree with.
+    fn components_flood(bits: &mut [u64; 4]) -> (u8, [u8; 256]) {
+        let mut labels = [u8::MAX; 256];
+        let get = |bits: &[u64; 4], i: usize| (bits[i >> 6] >> (i & 63)) & 1 != 0;
+        let mut n = 0u8;
+        let mut stack = [0u16; 256];
+        for start in 0..256usize {
+            if !get(bits, start) || labels[start] != u8::MAX {
+                continue;
+            }
+            let label = n;
+            let keep = (n as usize) < MAX_COMP;
+            let mut sp = 0;
+            stack[sp] = start as u16;
+            sp += 1;
+            labels[start] = label;
+            while sp > 0 {
+                sp -= 1;
+                let c = stack[sp] as usize;
+                let (x, y) = (c & 15, c >> 4);
+                let mut push = |nc: usize, stack: &mut [u16; 256], sp: &mut usize| {
+                    if get(bits, nc) && labels[nc] == u8::MAX {
+                        labels[nc] = label;
+                        stack[*sp] = nc as u16;
+                        *sp += 1;
+                    }
+                };
+                if x > 0 {
+                    push(c - 1, &mut stack, &mut sp);
+                }
+                if x < 15 {
+                    push(c + 1, &mut stack, &mut sp);
+                }
+                if y > 0 {
+                    push(c - 16, &mut stack, &mut sp);
+                }
+                if y < 15 {
+                    push(c + 16, &mut stack, &mut sp);
+                }
+            }
+            if keep {
+                n += 1;
+            } else {
+                // Too many pockets: drop this one.
+                for i in 0..256 {
+                    if labels[i] == label {
+                        bits[i >> 6] &= !(1 << (i & 63));
+                        labels[i] = u8::MAX - 1;
+                    }
+                }
+            }
+        }
+        for l in labels.iter_mut() {
+            if *l >= MAX_COMP as u8 {
+                *l = 0;
+            }
+        }
+        (n, labels)
+    }
+
+    #[test]
+    fn components_match_flood_fill() {
+        let mut seed = 7u64;
+        let mut next = || {
+            seed = riot_core::mix(seed.wrapping_add(0x9e37_79b9_7f4a_7c15));
+            seed
+        };
+        for case in 0..20_000 {
+            // Random cells at various densities, sometimes cut by a wall.
+            let density = [16u64, 96, 128, 160, 200, 240][case % 6];
+            let mut bits = [0u64; 4];
+            for i in 0..256 {
+                if next() % 256 < density {
+                    bits[i >> 6] |= 1 << (i & 63);
+                }
+            }
+            if case % 3 == 0 {
+                let col = (next() % 16) as usize;
+                for ly in 0..16 {
+                    if next() % 8 != 0 {
+                        let i = ly * 16 + col;
+                        bits[i >> 6] &= !(1 << (i & 63));
+                    }
+                }
+            }
+            let (mut a, mut b) = (bits, bits);
+            let (n, labels) = components(&mut a);
+            let (n0, labels0) = components_flood(&mut b);
+            assert_eq!((n, a), (n0, b), "case {case}");
+            assert_eq!(labels.unwrap_or([0; 256]), labels0, "case {case}");
+        }
+    }
+
+    #[test]
+    fn cross_keys_sort_like_crossings() {
+        let xs = [
+            f32::NEG_INFINITY,
+            -4096.0,
+            -1.5,
+            -f32::MIN_POSITIVE,
+            -0.0,
+            0.0,
+            1e-40,
+            0.25,
+            0.5,
+            4095.75,
+            f32::INFINITY,
+            f32::NAN,
+            -f32::NAN,
+        ];
+        let mut cross: Vec<(f32, i32)> = Vec::new();
+        for &x in &xs {
+            for sign in [-1, 1, i32::MIN, i32::MAX] {
+                cross.push((x, sign));
+            }
+        }
+        let mut seed = 3u64;
+        for _ in 0..1000 {
+            seed = riot_core::mix(seed.wrapping_add(1));
+            cross.push((
+                f32::from_bits(seed as u32),
+                if seed >> 63 == 0 { 1 } else { -1 },
+            ));
+        }
+        for &(x, sign) in &cross {
+            let (x2, sign2) = cross_of_key(cross_key(x, sign));
+            assert_eq!((x.to_bits(), sign), (x2.to_bits(), sign2));
+        }
+        let mut by_key = cross.clone();
+        by_key.sort_unstable_by_key(|&(x, sign)| cross_key(x, sign));
+        cross.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        let bits = |v: &[(f32, i32)]| v.iter().map(|&(x, s)| (x.to_bits(), s)).collect::<Vec<_>>();
+        assert_eq!(bits(&by_key), bits(&cross));
+    }
+
+    /// Where the cheap box tests say "too far", the exact tests agree: just
+    /// past the slack, far from the origin, for long and nearly
+    /// axis-parallel segments.
+    #[test]
+    fn box_rejects_are_exact() {
+        let mut seed = 11u64;
+        let mut next = || {
+            seed = riot_core::mix(seed.wrapping_add(0x9e37_79b9_7f4a_7c15));
+            (seed >> 40) as f32 / (1u64 << 24) as f32
+        };
+        let (mut boxes_skipped, mut cells_skipped) = (0, 0);
+        for case in 0..200_000 {
+            let c = Vec2::new(next() * 8000.0 - 4000.0, next() * 8000.0 - 4000.0);
+            let len = [0.01, 0.5, 4.0, 30.0, 500.0, 8000.0][case % 6] * (0.5 + next());
+            let angle = if case % 3 == 0 {
+                (case % 4) as f32 * std::f32::consts::FRAC_PI_2 + (next() - 0.5) * 1e-4
+            } else {
+                next() * std::f32::consts::TAU
+            };
+            let seg = Seg {
+                a: c,
+                b: c + Vec2::new(angle.cos(), angle.sin()) * len,
+            };
+            let (lo, hi) = (
+                Vec2::new(seg.a.x.min(seg.b.x), seg.a.y.min(seg.b.y)),
+                Vec2::new(seg.a.x.max(seg.b.x), seg.a.y.max(seg.b.y)),
+            );
+            // A 4 m box just past the segment's box plus margin and slack,
+            // on a random side, slid along that side.
+            let margin = [0.45, 0.47, 0.6][case % 3];
+            let gap = margin + 0.05 + next() * 0.02;
+            let slide = |l: f32, h: f32, t: f32| l - 4.0 + (h - l + 8.0) * t;
+            let bmin = match case % 4 {
+                0 => Vec2::new(hi.x + gap, slide(lo.y, hi.y, next())),
+                1 => Vec2::new(lo.x - gap - 4.0, slide(lo.y, hi.y, next())),
+                2 => Vec2::new(slide(lo.x, hi.x, next()), hi.y + gap),
+                _ => Vec2::new(slide(lo.x, hi.x, next()), lo.y - gap - 4.0),
+            };
+            let bmax = bmin + Vec2::new(4.0, 4.0);
+            let near = seg_box_near(&seg, bmin, bmax, margin);
+            assert_eq!(
+                near,
+                seg_box_dist2(seg.a, seg.b, bmin, bmax) <= margin * margin,
+                "case {case}"
+            );
+            boxes_skipped += !near as u32;
+            // A cell centre just outside the clearance box.
+            let b = clear_box(&seg);
+            let e = next() * 0.01;
+            let (u, v) = (next(), next());
+            let p = match case % 4 {
+                0 => Vec2::new(b[1] + e, b[2] + (b[3] - b[2]) * u),
+                1 => Vec2::new(b[0] - e, b[2] + (b[3] - b[2]) * u),
+                2 => Vec2::new(b[0] + (b[1] - b[0]) * v, b[3] + e),
+                _ => Vec2::new(b[0] + (b[1] - b[0]) * v, b[2] - e),
+            };
+            if p.x < b[0] || p.x > b[1] || p.y < b[2] || p.y > b[3] {
+                cells_skipped += 1;
+                let d2 = (riot_core::math::closest_on_segment(p, seg.a, seg.b) - p).len2();
+                assert!(d2 >= CLEARANCE * CLEARANCE, "case {case}: {d2}");
+            }
+        }
+        assert!(boxes_skipped > 150_000 && cells_skipped > 150_000);
     }
 }

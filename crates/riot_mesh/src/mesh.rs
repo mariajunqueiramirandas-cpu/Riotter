@@ -18,8 +18,6 @@
 //!
 //! This is the CPU side: `riot_render::mesh` uploads and draws the meshes.
 
-use std::collections::BTreeMap;
-
 use riot_art::{self as art, Rgb};
 use riot_materials::{Mat, TILE_M};
 use riot_sheets::Sprite;
@@ -92,15 +90,14 @@ impl Part {
 
     /// A simple polygon with texture coordinates from `uv(point)`.
     pub fn polygon_uv(&mut self, pts: &[[f32; 2]], c: Rgba, uv: impl Fn([f32; 2]) -> [f32; 2]) {
-        let mut tris = Vec::new();
-        triangulate(pts, &mut tris);
         let b = self.base();
         for &p in pts {
             self.v(p, uv(p), [0.0, 0.0], c);
         }
-        for t in tris {
-            self.idx.extend_from_slice(&[b + t[0], b + t[1], b + t[2]]);
-        }
+        let idx = &mut self.idx;
+        triangulate_with(pts, |t| {
+            idx.extend_from_slice(&[b + t[0], b + t[1], b + t[2]])
+        });
     }
 
     /// A quadrilateral with explicit texture coordinates.
@@ -283,50 +280,122 @@ impl Part {
     }
 }
 
-/// Layers of parts, drawn in order.
+/// Textures a batch can sample: every material, the decals, the things.
+const TEXES: usize = Mat::ALL.len() + 2;
+/// `(pass, tex)` keys of a layer.
+const KEYS: usize = 3 * TEXES;
+
+/// The slot of a `(pass, tex)` key in a layer: slots run in the keys' sort
+/// order (pass, then texture), the order batches are drawn in.
+#[inline]
+fn slot(pass: Pass, tex: Tex) -> usize {
+    let t = match tex {
+        Tex::Mat(m) => m as usize,
+        Tex::Decals => Mat::ALL.len(),
+        Tex::Things => Mat::ALL.len() + 1,
+    };
+    pass as usize * TEXES + t
+}
+
+/// The key of a slot.
+fn key(slot: usize) -> (Pass, Tex) {
+    let pass = [Pass::Normal, Pass::Shadow, Pass::Dither][slot / TEXES];
+    let t = slot % TEXES;
+    let tex = match t.checked_sub(Mat::ALL.len()) {
+        None => Tex::Mat(Mat::ALL[t]),
+        Some(0) => Tex::Decals,
+        Some(_) => Tex::Things,
+    };
+    (pass, tex)
+}
+
+/// Layers of parts, drawn in order. A layer holds one slot per `(pass,
+/// tex)` key, so finding a part is an index, not a search. A slot's part
+/// may be in pieces, one per builder [`MeshBuilder::append`] joined; the
+/// pieces are concatenated by `finish`.
 #[derive(Default)]
 pub struct MeshBuilder {
-    layers: Vec<BTreeMap<(Pass, Tex), Part>>,
+    layers: Vec<Vec<Vec<Part>>>,
 }
 
 impl MeshBuilder {
-    /// The part of `layer` for a texture and pass.
-    pub fn at(&mut self, layer: usize, tex: Tex, pass: Pass) -> &mut Part {
+    /// The pieces of a slot, made if missing.
+    #[inline]
+    fn slot_mut(&mut self, layer: usize, slot: usize) -> &mut Vec<Part> {
         if self.layers.len() <= layer {
-            self.layers.resize_with(layer + 1, BTreeMap::new);
+            self.layers.resize_with(layer + 1, Vec::new);
         }
-        self.layers[layer].entry((pass, tex)).or_default()
+        let parts = &mut self.layers[layer];
+        if parts.is_empty() {
+            parts.resize_with(KEYS, Vec::new);
+        }
+        &mut parts[slot]
+    }
+
+    /// The part of `layer` for a texture and pass.
+    #[inline]
+    pub fn at(&mut self, layer: usize, tex: Tex, pass: Pass) -> &mut Part {
+        let pieces = self.slot_mut(layer, slot(pass, tex));
+        if pieces.is_empty() {
+            pieces.push(Part::default());
+        }
+        let last = pieces.len() - 1;
+        &mut pieces[last]
     }
 
     /// Shortcut for a material in the normal pass.
+    #[inline]
     pub fn mat(&mut self, layer: usize, m: Mat) -> &mut Part {
         self.at(layer, Tex::Mat(m), Pass::Normal)
     }
 
     /// Shadows (plain colour, depth-tested).
+    #[inline]
     pub fn shadow(&mut self, layer: usize) -> &mut Part {
         self.at(layer, Tex::Mat(Mat::Solid), Pass::Shadow)
     }
 
+    /// Everything `other` holds, after what this holds: the mesh is the one
+    /// a single builder makes when it gets this one's primitives and then
+    /// `other`'s. The pieces move; nothing is copied until `finish`.
+    pub fn append(&mut self, other: MeshBuilder) {
+        for (l, layer) in other.layers.into_iter().enumerate() {
+            for (k, pieces) in layer.into_iter().enumerate() {
+                if !pieces.is_empty() {
+                    self.slot_mut(l, k).extend(pieces);
+                }
+            }
+        }
+    }
+
+    fn parts(&self) -> impl Iterator<Item = &Part> {
+        self.layers.iter().flatten().flatten()
+    }
+
     /// Flatten into one vertex and index list with batches in draw order.
     pub fn finish(self) -> (Vec<Vertex>, Vec<u32>, Vec<BatchDesc>) {
-        let mut verts = Vec::new();
-        let mut idx = Vec::new();
+        let mut verts = Vec::with_capacity(self.parts().map(|p| p.verts.len()).sum());
+        let mut idx = Vec::with_capacity(self.parts().map(|p| p.idx.len()).sum());
         let mut batches = Vec::new();
         for layer in self.layers {
-            for ((pass, tex), part) in layer {
-                if part.idx.is_empty() {
+            for (k, pieces) in layer.into_iter().enumerate() {
+                let count: usize = pieces.iter().map(|p| p.idx.len()).sum();
+                if count == 0 {
                     continue;
                 }
-                let base = verts.len() as u32;
+                let (pass, tex) = key(k);
                 let start = idx.len();
-                verts.extend_from_slice(&part.verts);
-                idx.extend(part.idx.iter().map(|i| i + base));
+                // Each piece's indices count from its own first vertex.
+                for part in pieces {
+                    let base = verts.len() as u32;
+                    verts.extend_from_slice(&part.verts);
+                    idx.extend(part.idx.iter().map(|i| i + base));
+                }
                 batches.push(BatchDesc {
                     pass,
                     tex,
                     start,
-                    count: part.idx.len(),
+                    count,
                 });
             }
         }
@@ -335,11 +404,62 @@ impl MeshBuilder {
 
     /// Triangles in all layers.
     pub fn triangles(&self) -> usize {
-        self.layers
-            .iter()
-            .flat_map(|l| l.values())
-            .map(|p| p.idx.len() / 3)
-            .sum()
+        self.parts().map(|p| p.idx.len() / 3).sum()
+    }
+
+    /// A builder for `items`, built in chunks on the available cores by
+    /// `add(builder, index, item)`: the chunks' builders are appended in item
+    /// order, so the mesh is the one a single pass over the items builds.
+    pub fn par_items<T: Sync>(
+        items: &[T],
+        add: impl Fn(&mut MeshBuilder, usize, &T) + Sync,
+    ) -> MeshBuilder {
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+        // A few chunks per thread, so uneven items still share out.
+        let chunk = (items.len() / (threads * 4)).clamp(16, 1024);
+        let chunks = items.len().div_ceil(chunk);
+        let build = |c: usize| {
+            let mut m = MeshBuilder::default();
+            let lo = c * chunk;
+            for (k, item) in items[lo..items.len().min(lo + chunk)].iter().enumerate() {
+                add(&mut m, lo + k, item);
+            }
+            m
+        };
+        let mut out = MeshBuilder::default();
+        // Small maps are quicker without threads.
+        if threads < 2 || items.len() < 512 {
+            for (k, item) in items.iter().enumerate() {
+                add(&mut out, k, item);
+            }
+            return out;
+        }
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let mut built: Vec<(usize, MeshBuilder)> = std::thread::scope(|s| {
+            let workers: Vec<_> = (0..threads.min(chunks))
+                .map(|_| {
+                    s.spawn(|| {
+                        let mut mine = Vec::new();
+                        loop {
+                            let c = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if c >= chunks {
+                                break mine;
+                            }
+                            mine.push((c, build(c)));
+                        }
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .flat_map(|w| w.join().expect("mesh builder thread"))
+                .collect()
+        });
+        built.sort_unstable_by_key(|&(c, _)| c);
+        for (_, m) in built {
+            out.append(m);
+        }
+        out
     }
 }
 
@@ -371,47 +491,63 @@ pub fn cross(o: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
 
 /// Ear-clipping triangulation of a simple polygon. Indices into `pts`.
 pub fn triangulate(pts: &[[f32; 2]], out: &mut Vec<[u32; 3]>) {
+    triangulate_with(pts, |t| out.push(t));
+}
+
+/// [`triangulate`], handing each triangle to `emit` in turn. The list of
+/// remaining corners lives on the stack for polygons of up to 64 points
+/// (nearly all of them), so building a city's meshes allocates nothing per
+/// polygon.
+fn triangulate_with(pts: &[[f32; 2]], mut emit: impl FnMut([u32; 3])) {
     let n = pts.len();
     if n < 3 {
         return;
     }
-    let mut idx: Vec<u32> = (0..n as u32).collect();
+    let mut stack = [0u32; 64];
+    let mut heap = Vec::new();
+    let idx: &mut [u32] = if n <= stack.len() {
+        &mut stack[..n]
+    } else {
+        heap.resize(n, 0);
+        &mut heap
+    };
+    for (k, i) in idx.iter_mut().enumerate() {
+        *i = k as u32;
+    }
     if signed_area2(pts) < 0.0 {
         idx.reverse();
     }
+    // The corners left are `idx[..m]`.
+    let mut m = n;
     let mut guard = 0;
-    while idx.len() > 3 && guard < n * n {
+    while m > 3 && guard < n * n {
         guard += 1;
-        let m = idx.len();
-        let mut clipped = false;
-        for i in 0..m {
+        // The first ear: a convex corner with no other corner inside.
+        let ear = (0..m).find_map(|i| {
             let (ia, ib, ic) = (idx[(i + m - 1) % m], idx[i], idx[(i + 1) % m]);
             let (a, b, c) = (pts[ia as usize], pts[ib as usize], pts[ic as usize]);
             if cross(a, b, c) <= 0.0 {
-                continue; // reflex or degenerate
+                return None; // reflex or degenerate
             }
-            let inside = idx.iter().any(|&j| {
+            let inside = idx[..m].iter().any(|&j| {
                 if j == ia || j == ib || j == ic {
                     return false;
                 }
                 let p = pts[j as usize];
                 cross(a, b, p) > 0.0 && cross(b, c, p) > 0.0 && cross(c, a, p) > 0.0
             });
-            if inside {
-                continue;
-            }
-            out.push([ia, ib, ic]);
-            idx.remove(i);
-            clipped = true;
+            (!inside).then_some((i, [ia, ib, ic]))
+        });
+        let Some((i, tri)) = ear else {
             break;
-        }
-        if !clipped {
-            break;
-        }
+        };
+        emit(tri);
+        idx.copy_within(i + 1..m, i);
+        m -= 1;
     }
     // Whatever is left (a triangle, or a degenerate rest) becomes a fan.
-    for k in 1..idx.len().saturating_sub(1) {
-        out.push([idx[0], idx[k], idx[k + 1]]);
+    for k in 1..m.saturating_sub(1) {
+        emit([idx[0], idx[k], idx[k + 1]]);
     }
 }
 
@@ -514,6 +650,60 @@ pub fn runs(verts: &[Vertex], idx: &[u32], start: usize, count: usize) -> Vec<Ru
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn appended_builders_make_one_mesh() {
+        let square = [[0.0, 0.0], [2.0, 0.0], [2.0, 1.0], [0.0, 1.0]];
+        let add = |m: &mut MeshBuilder, k: usize| {
+            let x = k as f32;
+            m.mat(k % 3, Mat::ALL[k % 5])
+                .rect(x, 0.0, x + 1.0, 1.0, WHITE);
+            m.shadow(1).polygon(&square, [0, 0, 0, 90]);
+            m.at(2, Tex::Decals, Pass::Dither)
+                .line([x, 0.0], [x, 3.0], 0.2, WHITE);
+        };
+        let items: Vec<usize> = (0..1000).collect();
+        let mut one = MeshBuilder::default();
+        for &k in &items {
+            add(&mut one, k);
+        }
+        let joined = MeshBuilder::par_items(&items, |m, _, &k| add(m, k));
+        let (a, b) = (one.finish(), joined.finish());
+        let bits = |v: &[Vertex]| {
+            v.iter()
+                .map(|x| (x.pos.map(f32::to_bits), x.uv.map(f32::to_bits), x.color))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(bits(&a.0), bits(&b.0));
+        assert_eq!(a.1, b.1);
+        let batches = |v: &[BatchDesc]| {
+            v.iter()
+                .map(|x| (x.pass, x.tex, x.start, x.count))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(batches(&a.2), batches(&b.2));
+    }
+
+    #[test]
+    fn slots_follow_the_key_order() {
+        let mut keys = Vec::new();
+        for pass in [Pass::Normal, Pass::Shadow, Pass::Dither] {
+            for tex in Mat::ALL
+                .map(Tex::Mat)
+                .into_iter()
+                .chain([Tex::Decals, Tex::Things])
+            {
+                keys.push((pass, tex));
+            }
+        }
+        assert_eq!(keys.len(), KEYS);
+        for &a in &keys {
+            assert_eq!(key(slot(a.0, a.1)), a);
+            for &b in &keys {
+                assert_eq!(a.cmp(&b), slot(a.0, a.1).cmp(&slot(b.0, b.1)));
+            }
+        }
+    }
 
     fn area_of(pts: &[[f32; 2]], tris: &[[u32; 3]]) -> f32 {
         tris.iter()
