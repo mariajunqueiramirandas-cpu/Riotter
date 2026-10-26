@@ -53,14 +53,14 @@ pub fn pin_emitters(w: &mut World) {
 }
 
 /// Cameras: the layer counts the cameras that can see each cell, from
-/// filming journalists and phones (DESIGN §2.7). Every 10 ticks.
+/// filming journalists and phones (DESIGN §2.7). Every 10 ticks. The chunks
+/// are stamped in parallel, each adding the cameras in index order.
 pub fn stamp_cameras(w: &mut World) {
-    for slot in 0..w.fields.pool {
-        if w.fields.slot_chunk[slot] != NO_CHUNK {
-            w.fields.layer_mut(slot, Layer::Camera).fill(0.0);
-        }
-    }
-    let r = w.tun.camera_radius;
+    let rc = w.tun.camera_radius / FIELD_CELL;
+    let f = &mut w.fields;
+    f.cones.clear();
+    // Room for everyone once, so filming never allocates.
+    f.cones.reserve(w.people.cap);
     for i in 0..w.people.len {
         let st = w.people.stat[i];
         if st[stat::FLAGS] & flag::DEAD != 0 || Action::from_u8(st[stat::ACTION]) != Action::Film {
@@ -69,31 +69,14 @@ pub fn stamp_cameras(w: &mut World) {
         let p = w.people.pos(i);
         // The camera sees a half-disc in front.
         let fwd = Vec2::from_heading(w.people.pose[i][pose::HEADING]);
-        let weight = if Archetype::from_u8(st[stat::ARCH]) == Archetype::Journalist {
+        let v = if Archetype::from_u8(st[stat::ARCH]) == Archetype::Journalist {
             2.0
         } else {
             1.0
         };
-        stamp_cone(w, p, fwd, r, weight);
+        f.push_cone(p, fwd, rc, v);
     }
-}
-
-fn stamp_cone(w: &mut World, p: Vec2, fwd: Vec2, r: f32, v: f32) {
-    let f = &mut w.fields;
-    let (fx, fy) = f.geom.to_cell_f(p.x, p.y);
-    let rc = r / FIELD_CELL;
-    let dim = f.geom.dim as i32;
-    for cy in ((fy - rc).floor() as i32).max(0)..((fy + rc).ceil() as i32).min(dim) {
-        for cx in ((fx - rc).floor() as i32).max(0)..((fx + rc).ceil() as i32).min(dim) {
-            let (dx, dy) = (cx as f32 + 0.5 - fx, cy as f32 + 0.5 - fy);
-            if dx * dx + dy * dy > rc * rc || dx * fwd.x + dy * fwd.y < -0.5 {
-                continue;
-            }
-            if let Some(s) = f.slot_of_chunk(cx / CC as i32, cy / CC as i32) {
-                f.layer_mut(s, Layer::Camera)[(cy as usize % CC) * CC + cx as usize % CC] += v;
-            }
-        }
-    }
+    f.stamp_cones(Layer::Camera);
 }
 
 /// Gas and smoke drift with the wind, diffuse and decay; fire burns fuel and
@@ -153,10 +136,12 @@ fn fire(w: &mut World, tick: u32) {
     let mut any = false;
     for slot in 0..w.fields.pool {
         let c = w.fields.slot_chunk[slot];
-        if c == NO_CHUNK {
+        if c == NO_CHUNK || w.fields.is_zero(slot, Layer::Fire) {
             continue;
         }
         if !w.fields.layer(slot, Layer::Fire).iter().any(|&v| v > 0.0) {
+            // Burnt out: from now on the slot is skipped without a look.
+            w.fields.refresh_zero(slot, Layer::Fire);
             continue;
         }
         any = true;

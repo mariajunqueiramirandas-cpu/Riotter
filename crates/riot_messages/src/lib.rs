@@ -16,7 +16,6 @@
 #![deny(unsafe_code)]
 
 use riot_core::Vec2;
-use riot_core::grid::demorton2;
 use riot_core::lanes::{self, CHUNK_AGENTS};
 use riot_core::rng::{Stream, roll, roll_key, unit};
 use riot_team::prelude::*;
@@ -25,7 +24,7 @@ use riot_defs::archetype::{ARCHETYPES, Archetype, ArchetypeParams, Stance};
 use riot_defs::setup::{CommsMode, NotableKind, minutes};
 use riot_defs::state::{Action, belief, emo, flag, intent, stat};
 use riot_defs::targets::Objective;
-use riot_fields::{CC, CL, Fields, Layer, NO_CHUNK, NO_SLOT};
+use riot_fields::{CC, CL, Fields, Layer, NO_CHUNK, NO_SLOT, run_cell};
 use riot_people::People;
 use riot_spatial::{FIELD_CELL, Spatial};
 use riot_world::World;
@@ -76,11 +75,7 @@ pub fn set_chant(w: &mut World, organizer: u32, on: bool) {
 /// of their own stamina (DESIGN §2.4).
 pub fn stamp_chants(w: &mut World) {
     if w.msgs.chant_live {
-        for slot in 0..w.fields.pool {
-            if w.fields.slot_chunk[slot] != NO_CHUNK {
-                w.fields.layer_mut(slot, Layer::Chant).fill(0.0);
-            }
-        }
+        w.fields.clear_layer(Layer::Chant);
         w.msgs.chant_live = false;
     }
     let r = w.tun.chant_radius;
@@ -180,7 +175,6 @@ fn scatter(f: &mut Fields, sp: &Spatial, p: &People, hop: u16) {
         m.fill(0);
         let [r0, r1] = slot_runs[slot];
         for run in &sp.runs[r0 as usize..r1 as usize] {
-            let (lx, ly) = demorton2(run.key & 0xfff);
             let mut best = 0u16;
             for &i in &sp.fsort.order[run.start as usize..run.end as usize] {
                 let b = p.belief[i as usize];
@@ -193,7 +187,7 @@ fn scatter(f: &mut Fields, sp: &Spatial, p: &People, hop: u16) {
                 }
                 best = best.max(belief::pack(belief::id(b), fid as u8));
             }
-            m[ly as usize * CC + lx as usize] = best;
+            m[run_cell(run.key)] = best;
         }
     });
 }
@@ -224,6 +218,13 @@ fn lose(v: u16, hop: u16) -> u16 {
     v.wrapping_sub(hop << 8) * keep
 }
 
+/// Slot `s` of a message layer as rows of `CC` cells (fixed-length rows
+/// vectorize).
+#[inline(always)]
+fn rows(m: &[u16], s: usize) -> &[[u16; CC]] {
+    m[s * CL..(s + 1) * CL].as_chunks::<CC>().0
+}
+
 /// 3 × 3 max filter with a hop's fidelity loss, across chunk borders: rows
 /// `msg → msg_tmp`, then columns `msg_tmp → msg`.
 fn dilate(f: &mut Fields, hop: u16) {
@@ -247,14 +248,15 @@ fn dilate(f: &mut Fields, hop: u16) {
                     let s = table[(cy * cdim + x as u32) as usize];
                     (s != NO_SLOT).then_some(s as usize)
                 };
-                let (l, r) = (nb(-1), nb(1));
-                let me = &msg[slot * CL..(slot + 1) * CL];
+                let (l, r) = (nb(-1).map(|s| rows(msg, s)), nb(1).map(|s| rows(msg, s)));
+                let me = rows(msg, slot);
+                let out = out.as_chunks_mut::<CC>().0;
                 let mut row = [0u16; CC + 2];
                 for y in 0..CC {
-                    row[1..CC + 1].copy_from_slice(&me[y * CC..(y + 1) * CC]);
-                    row[0] = l.map_or(0, |s| msg[s * CL + y * CC + CC - 1]);
-                    row[CC + 1] = r.map_or(0, |s| msg[s * CL + y * CC]);
-                    let o = &mut out[y * CC..(y + 1) * CC];
+                    row[1..CC + 1].copy_from_slice(&me[y]);
+                    row[0] = l.map_or(0, |l| l[y][CC - 1]);
+                    row[CC + 1] = r.map_or(0, |r| r[y][0]);
+                    let o = &mut out[y];
                     for x in 0..CC {
                         o[x] = row[x + 1].max(lose(row[x], hop)).max(lose(row[x + 2], hop));
                     }
@@ -280,18 +282,15 @@ fn dilate(f: &mut Fields, hop: u16) {
                 (s != NO_SLOT).then_some(s as usize)
             };
             let zero = [0u16; CC];
-            let me = &tmp[slot * CL..(slot + 1) * CL];
-            let up = nb(-1).map_or(&zero[..], |s| &tmp[s * CL + (CC - 1) * CC..s * CL + CL]);
-            let down = nb(1).map_or(&zero[..], |s| &tmp[s * CL..s * CL + CC]);
+            let me = rows(tmp, slot);
+            let up = nb(-1).map_or(&zero, |s| &rows(tmp, s)[CC - 1]);
+            let down = nb(1).map_or(&zero, |s| &rows(tmp, s)[0]);
+            let out = out.as_chunks_mut::<CC>().0;
             for y in 0..CC {
-                let a = if y > 0 { &me[(y - 1) * CC..y * CC] } else { up };
-                let b = &me[y * CC..(y + 1) * CC];
-                let d = if y + 1 < CC {
-                    &me[(y + 1) * CC..(y + 2) * CC]
-                } else {
-                    down
-                };
-                let o = &mut out[y * CC..(y + 1) * CC];
+                let a = if y > 0 { &me[y - 1] } else { up };
+                let b = &me[y];
+                let d = if y + 1 < CC { &me[y + 1] } else { down };
+                let o = &mut out[y];
                 for x in 0..CC {
                     o[x] = b[x].max(lose(a[x], hop)).max(lose(d[x], hop));
                 }
