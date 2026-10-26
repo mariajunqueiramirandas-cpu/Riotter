@@ -14,7 +14,9 @@ use riot_defs::state::{Action, Gait, aux, emo, flag, health, intent, pose, stat}
 use riot_defs::targets::{Objective, SupplyDrop};
 use riot_defs::tunables::Tunables;
 use riot_fields::{Fields, Layer, field_cell_pos};
-use riot_flow::{FlowSample, FlowSystem, GOAL_EXITS, GOAL_MEDIC, GOAL_WATER, NO_GOAL, sample_flow};
+use riot_flow::{
+    FlowSample, FlowSystem, GOAL_EXITS, GOAL_MEDIC, GOAL_WATER, NO_GOAL, Records, sample_flow,
+};
 use riot_map::Map;
 use riot_people::People;
 use riot_spatial::Spatial;
@@ -52,7 +54,7 @@ pub fn steer(
     p: &mut People,
     old_vx: &[f32],
     old_vy: &[f32],
-    records: &mut [Vec<u64>],
+    records: &mut [Records],
     cx: &SteerCtx,
 ) {
     let len = p.len;
@@ -71,9 +73,25 @@ pub fn steer(
         stable_id,
         ..
     } = p;
-    let px = lanes::flat(pos_x);
-    let py = lanes::flat(pos_y);
-    let (stat, emo, intent, aux, stable_id) = (&*stat, &*emo, &*intent, &*aux, &*stable_id);
+    // Everything indexed by a neighbour has one length, and everything
+    // indexed only by the agent is cut to `len`, so one bounds check
+    // covers each group.
+    let (px, py, radius) = (lanes::flat(pos_x), lanes::flat(pos_y), &cx.sp.radius[..]);
+    let m = px
+        .len()
+        .min(py.len())
+        .min(old_vx.len())
+        .min(old_vy.len())
+        .min(radius.len());
+    let (px, py, old_vx, old_vy, radius) =
+        (&px[..m], &py[..m], &old_vx[..m], &old_vy[..m], &radius[..m]);
+    let (stat, emo, intent, aux, stable_id) = (
+        &stat[..len],
+        &emo[..len],
+        &intent[..len],
+        &aux[..len],
+        &stable_id[..len],
+    );
     let vx = &mut lanes::flat_mut(vel_x)[..chunks * CHUNK_AGENTS];
     let vy = &mut lanes::flat_mut(vel_y)[..chunks * CHUNK_AGENTS];
     let pose = &mut pose[..chunks * CHUNK_AGENTS];
@@ -121,7 +139,7 @@ pub fn steer(
 
                 let mut desired = Vec2::ZERO;
                 let mut face: Option<Vec2> = None;
-                let route = |g: u8, rec: &mut Vec<u64>, fallback: Vec2| -> Option<Vec2> {
+                let route = |g: u8, rec: &mut Records, fallback: Vec2| -> Option<Vec2> {
                     if g == NO_GOAL {
                         return None;
                     }
@@ -334,7 +352,7 @@ pub fn steer(
                     let w = Vec2::new(old_vx[j], old_vy[j]);
                     let d = q - pos;
                     let rv = desired - w;
-                    let rr = ri + cx.sp.radius[j];
+                    let rr = ri + radius[j];
                     if d.len2() < (rr + 0.05) * (rr + 0.05) {
                         touching += 1;
                     }
