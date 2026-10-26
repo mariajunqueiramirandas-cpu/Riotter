@@ -24,6 +24,7 @@
 use riot_core::Vec2;
 use riot_core::math::widen_u8;
 use riot_core::rng::{Stream, roll_key, unit};
+use riot_team::prelude::*;
 
 use riot_defs::archetype::Archetype;
 use riot_defs::police::{Call, Doctrine, NO_CORDON};
@@ -107,23 +108,39 @@ fn dispatch(w: &mut World, s: usize) {
 fn clusters(w: &mut World) {
     let f = &w.fields;
     let p = &mut w.police;
+    // Find each active slot's dense cells in parallel, then number them in
+    // slot-then-cell order, the order everything below depends on.
+    p.label[..f.pool * CL]
+        .par_chunks_mut(CL)
+        .zip(p.dense[..f.pool * CL].par_chunks_mut(CL))
+        .zip(p.dense_n[..f.pool].par_iter_mut())
+        .enumerate()
+        .for_each(|(slot, ((lab, dense), n))| {
+            *n = 0;
+            if f.slot_chunk[slot] == NO_CHUNK {
+                return;
+            }
+            let mut m = 0;
+            for (cell, &d) in f.layer(slot, Layer::Dens).iter().enumerate() {
+                if d >= 1.0 {
+                    dense[m] = cell as u16;
+                    m += 1;
+                } else {
+                    lab[cell] = u32::MAX;
+                }
+            }
+            *n = m as u32;
+        });
     p.cells.clear();
     p.parent.clear();
     for slot in 0..f.pool {
         let c = f.slot_chunk[slot];
-        let lab = &mut p.label[slot * CL..(slot + 1) * CL];
-        if c == NO_CHUNK {
-            continue;
-        }
-        let dens = f.layer(slot, Layer::Dens);
-        for (cell, &d) in dens.iter().enumerate() {
-            if d >= 1.0 {
-                lab[cell] = p.cells.len() as u32;
-                p.parent.push(p.cells.len() as u32);
-                p.cells.push((slot as u32, cell as u32, c));
-            } else {
-                lab[cell] = u32::MAX;
-            }
+        let dense = &p.dense[slot * CL..][..p.dense_n[slot] as usize];
+        for &cell in dense {
+            let k = p.cells.len() as u32;
+            p.label[slot * CL + cell as usize] = k;
+            p.parent.push(k);
+            p.cells.push((slot as u32, cell as u32, c));
         }
     }
     fn find(par: &mut [u32], mut x: u32) -> u32 {
@@ -167,7 +184,6 @@ fn clusters(w: &mut World) {
     // Accumulate per root, roots in index order.
     #[derive(Clone, Copy)]
     struct Acc {
-        root: u32,
         dens: f64,
         x: f64,
         y: f64,
@@ -179,7 +195,6 @@ fn clusters(w: &mut World) {
         hi: Vec2,
     }
     let mut acc = [Acc {
-        root: u32::MAX,
         dens: 0.0,
         x: 0.0,
         y: 0.0,
@@ -192,6 +207,10 @@ fn clusters(w: &mut World) {
     }; MAX_CLUSTERS * 4];
     let empty = acc[0];
     let mut nacc = 0usize;
+    // Roots are cell indices: look their accumulator up (the same
+    // first-come order as a search).
+    p.acc_of.clear();
+    p.acc_of.resize(p.cells.len(), u32::MAX);
     for k in 0..p.cells.len() {
         let root = find(&mut p.parent, k as u32);
         let (slot, cell, c) = p.cells[k];
@@ -202,14 +221,15 @@ fn clusters(w: &mut World) {
             cy * CC as u32 + cell / CC as u32,
         );
         let (x, y) = f.geom.centre(gx, gy);
-        let e = match acc[..nacc].iter().position(|a| a.root == root) {
-            Some(e) => e,
-            None if nacc < acc.len() => {
-                acc[nacc] = Acc { root, ..empty };
+        let e = match p.acc_of[root as usize] {
+            u32::MAX if nacc < acc.len() => {
+                acc[nacc] = empty;
+                p.acc_of[root as usize] = nacc as u32;
                 nacc += 1;
                 nacc - 1
             }
-            None => continue,
+            u32::MAX => continue,
+            e => e as usize,
         };
         let a = &mut acc[e];
         a.dens += d;

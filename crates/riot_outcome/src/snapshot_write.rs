@@ -1,7 +1,7 @@
 //! Phase 11b: the render snapshot (DESIGN §18.1). People are gathered
 //! through `slot_of` into `stable_id` order, in parallel over output chunks.
 
-use riot_core::lanes;
+use riot_core::lanes::{self, CHUNK_AGENTS};
 use riot_core::math::{narrow_u8, widen_u8};
 use riot_team::prelude::*;
 
@@ -297,27 +297,40 @@ pub fn write(w: &mut World) {
         tick: w.tick,
         ..Default::default()
     };
-    let (mut fear, mut anger, mut morale, mut n) = (0.0f64, 0.0f64, 0.0f64, 0u32);
-    for i in 0..w.people.len {
-        let x = w.people.stat[i];
-        if x[stat::FLAGS] & flag::DEAD != 0 {
-            continue;
-        }
-        st.present += 1;
-        if x[stat::FLAGS] & flag::ASLEEP != 0 {
-            st.asleep += 1;
-        }
-        if Archetype::from_u8(x[stat::ARCH]).is_officer() {
-            st.officers += 1;
-        } else {
-            st.protesters += 1;
-            let e = w.people.emo[i];
-            fear += widen_u8(e[emo::FEAR]) as f64;
-            anger += widen_u8(e[emo::ANGER]) as f64;
-            morale += widen_u8(e[emo::MORALE]) as f64;
-            n += 1;
-        }
-    }
+    // Tallied per chunk in parallel. The emotion sums are exact in any
+    // order: each term is an f32 multiple of 2⁻³² below 1 and there are
+    // fewer than 2¹⁶ of them, so every partial sum fits f64's 53 bits.
+    let len = w.people.len;
+    let t = w.people.stat[..len]
+        .par_chunks(CHUNK_AGENTS)
+        .zip(w.people.emo[..len].par_chunks(CHUNK_AGENTS))
+        .map(|(ss, es)| {
+            let mut t = Tally::default();
+            for (x, e) in ss.iter().zip(es) {
+                if x[stat::FLAGS] & flag::DEAD != 0 {
+                    continue;
+                }
+                t.present += 1;
+                if x[stat::FLAGS] & flag::ASLEEP != 0 {
+                    t.asleep += 1;
+                }
+                if Archetype::from_u8(x[stat::ARCH]).is_officer() {
+                    t.officers += 1;
+                } else {
+                    t.protesters += 1;
+                    t.fear += widen_u8(e[emo::FEAR]) as f64;
+                    t.anger += widen_u8(e[emo::ANGER]) as f64;
+                    t.morale += widen_u8(e[emo::MORALE]) as f64;
+                }
+            }
+            t
+        })
+        .reduce(Tally::default, Tally::add);
+    st.present = t.present;
+    st.asleep = t.asleep;
+    st.officers = t.officers;
+    st.protesters = t.protesters;
+    let (fear, anger, morale, n) = (t.fear, t.anger, t.morale, t.protesters);
     if n > 0 {
         st.mean_fear = (fear / n as f64) as f32;
         st.mean_anger = (anger / n as f64) as f32;
@@ -336,4 +349,30 @@ pub fn write(w: &mut World) {
     st.radio = w.police.cmd.radio;
     st.radio_n = w.police.cmd.radio_n;
     w.snapshot.stats = st;
+}
+
+/// Counts and emotion sums of a chunk of people.
+#[derive(Clone, Copy, Default)]
+struct Tally {
+    present: u32,
+    asleep: u32,
+    officers: u32,
+    protesters: u32,
+    fear: f64,
+    anger: f64,
+    morale: f64,
+}
+
+impl Tally {
+    fn add(a: Tally, b: Tally) -> Tally {
+        Tally {
+            present: a.present + b.present,
+            asleep: a.asleep + b.asleep,
+            officers: a.officers + b.officers,
+            protesters: a.protesters + b.protesters,
+            fear: a.fear + b.fear,
+            anger: a.anger + b.anger,
+            morale: a.morale + b.morale,
+        }
+    }
 }

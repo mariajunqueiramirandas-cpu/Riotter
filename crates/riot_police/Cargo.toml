@@ -13,6 +13,7 @@ riot_fields.workspace = true
 riot_flow.workspace = true
 riot_snapshot.workspace = true
 riot_tactics.workspace = true
+riot_team.workspace = true
 riot_world.workspace = true
 
 [lints]

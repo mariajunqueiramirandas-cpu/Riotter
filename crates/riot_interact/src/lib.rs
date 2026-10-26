@@ -109,8 +109,11 @@ fn emit(w: &mut World) {
                             amount: narrow_u8((pressure - crush) / (1.0 - crush)),
                         });
                     }
-                    let r = unit(roll_key(seed, tick, stable, 1, Stream::Body));
-                    if pressure > fallp && r < tun.fall_chance * (pressure - fallp) / (1.0 - fallp)
+                    // Drawn only under pressure: a pure function, so not
+                    // drawing it when unused changes nothing.
+                    let r = || unit(roll_key(seed, tick, stable, 1, Stream::Body));
+                    if pressure > fallp
+                        && r() < tun.fall_chance * (pressure - fallp) / (1.0 - fallp)
                     {
                         push(Event::Fall { who: iu });
                     } else if pressure > 0.25 {
@@ -119,7 +122,7 @@ fn emit(w: &mut World) {
                             .iter()
                             .filter(|&&j| p.pose[j as usize][pose::GAIT] == Gait::Fallen as u8)
                             .count();
-                        if fallen > 0 && r < tun.trip_chance * fallen as f32 * pressure {
+                        if fallen > 0 && r() < tun.trip_chance * fallen as f32 * pressure {
                             push(Event::Fall { who: iu });
                         }
                     }
